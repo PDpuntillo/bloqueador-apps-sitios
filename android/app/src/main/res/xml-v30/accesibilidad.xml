@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Igual que xml/accesibilidad.xml, más flagRequestAccessibilityButton: con esa bandera, el atajo
+    de accesibilidad (mantener las teclas de volumen o el botón) ya no puede apagar el servicio.
+    El botón no hace nada: no se registra ninguna acción para él.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagRequestAccessibilityButton"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/descripcion_accesibilidad_boton"
+    android:notificationTimeout="0" />

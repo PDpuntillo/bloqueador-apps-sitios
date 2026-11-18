@@ -1,0 +1,10 @@
+# El APK compilado se publica como Release en GitHub, no en el repositorio.
+*.apk
+
+# Python
+__pycache__/
+*.pyc
+
+# Sistema operativo
+.DS_Store
+Thumbs.db

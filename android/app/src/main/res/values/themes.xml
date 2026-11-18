@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="fondo_icono">#B3261E</color>
+    <color name="fondo_claro">#FCFCFC</color>
+    <color name="fondo_oscuro">#141313</color>
+
+    <style name="Theme.Bloqueador" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/fondo_claro</item>
+    </style>
+</resources>

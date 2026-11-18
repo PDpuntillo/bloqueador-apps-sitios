@@ -1,0 +1,6 @@
+* text=auto
+# El script de Gradle para Linux y Mac necesita finales de línea LF; el de Windows, CRLF.
+android/gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.png binary
