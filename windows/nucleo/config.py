@@ -1,4 +1,4 @@
-"""Configuración del bloqueador: listas, horarios y sesión de concentración.
+"""Configuración del bloqueador: listas, horarios, límites diarios y sesión de concentración.
 
 Se guarda como JSON en %PROGRAMDATA%\\Bloqueador\\config.json.
 """
@@ -100,6 +100,23 @@ class Horario:
         return f"{texto_dias}  ·  {horas}"
 
 
+TIPOS_LIMITE = ("app", "sitio")
+MAX_MINUTOS_LIMITE = 24 * 60 - 1   # un límite de 24 h no limitaría nada
+
+
+@dataclass
+class Limite:
+    """Tiempo de uso permitido por día de una app ("discord.exe") o un sitio ("instagram.com")."""
+    tipo: str      # "app" o "sitio"
+    nombre: str
+    minutos: int
+
+    @property
+    def clave(self) -> str:
+        """Identifica el límite en el registro de uso: "app:discord.exe", "sitio:instagram.com"."""
+        return f"{self.tipo}:{self.nombre}"
+
+
 @dataclass
 class Estado:
     activo: bool
@@ -115,6 +132,10 @@ class Config:
     horarios: list[Horario] = field(default_factory=list)
     sesion_fin: str | None = None   # fecha y hora ISO en que termina la sesión
     autoinicio: bool = False
+    limites: list[Limite] = field(default_factory=list)   # límites diarios, ordenados por tipo y nombre
+
+    def limite(self, tipo: str, nombre: str) -> Limite | None:
+        return next((l for l in self.limites if l.tipo == tipo and l.nombre == nombre), None)
 
     def fin_sesion(self) -> datetime | None:
         if not self.sesion_fin:
@@ -181,6 +202,7 @@ class Config:
     def a_dict(self) -> dict:
         d = asdict(self)
         d["horarios"] = [asdict(h) for h in self.horarios]
+        d["limites"] = [asdict(l) for l in self.limites]
         return d
 
     @classmethod
@@ -194,12 +216,25 @@ class Config:
                 continue
             if inicio and fin and dias:
                 horarios.append(Horario(dias, inicio, fin))
+        limites: dict[str, Limite] = {}
+        for l in d.get("limites", []):
+            try:
+                tipo, nombre, minutos = str(l["tipo"]), str(l["nombre"]).strip().lower(), int(l["minutos"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            nuevo = Limite(tipo, nombre, minutos)
+            if tipo in TIPOS_LIMITE and nombre and 1 <= minutos <= MAX_MINUTOS_LIMITE:
+                # Si está repetido, queda el más estricto.
+                anterior = limites.get(nuevo.clave)
+                if anterior is None or minutos < anterior.minutos:
+                    limites[nuevo.clave] = nuevo
         return cls(
             sitios=sorted({str(s) for s in d.get("sitios", [])}),
             apps=sorted({str(a).lower() for a in d.get("apps", [])}),
             horarios=horarios,
             sesion_fin=d.get("sesion_fin") or None,
             autoinicio=bool(d.get("autoinicio", False)),
+            limites=sorted(limites.values(), key=lambda l: (l.tipo, l.nombre)),
         )
 
 

@@ -78,6 +78,32 @@ object Paquetes {
     fun actividadPermitida(clase: String?): Boolean =
         clase != null && (clase in ACTIVIDADES_PERMITIDAS || clase.endsWith(".permission.ui.GrantPermissionsActivity"))
 
+    /**
+     * Navegadores conocidos -> ids de la vista de su barra de direcciones. Con un límite diario
+     * en algún sitio, ServicioAccesibilidad lee esa barra (solo esa vista) para saber qué sitio
+     * está a la vista. En otros navegadores el tiempo de los sitios no se cuenta.
+     */
+    val BARRAS_DE_DIRECCION: Map<String, List<String>> = buildMap {
+        val chromium = listOf("url_bar")
+        for (p in listOf(
+            "com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary",
+            "org.chromium.chrome", "com.brave.browser", "com.brave.browser_beta", "com.microsoft.emmx",
+            "com.vivaldi.browser", "com.kiwibrowser.browser", "org.bromite.bromite", "com.cromite.cromite",
+        )) put(p, chromium)
+        val samsung = listOf("location_bar_edit_text")
+        put("com.sec.android.app.sbrowser", samsung)
+        put("com.sec.android.app.sbrowser.beta", samsung)
+        val firefox = listOf("mozac_browser_toolbar_url_view", "url_bar_title")
+        for (p in listOf("org.mozilla.firefox", "org.mozilla.firefox_beta", "org.mozilla.fenix", "io.github.forkmaintainers.iceraven")) {
+            put(p, firefox)
+        }
+        put("org.mozilla.focus", listOf("display_url", "mozac_browser_toolbar_url_view"))
+        put("com.opera.browser", listOf("url_field"))
+        put("com.opera.mini.native", listOf("url_field"))
+        put("com.duckduckgo.mobile.android", listOf("omnibarTextInput"))
+        put("com.mi.globalbrowser", listOf("url"))
+    }
+
     /** Diálogo del sistema para dar permiso de VPN (se permite un momento cuando la app lo pide). */
     const val DIALOGO_VPN = "com.android.vpndialogs"
 

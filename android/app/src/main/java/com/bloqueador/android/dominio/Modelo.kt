@@ -89,6 +89,20 @@ data class Horario(
     }
 }
 
+/** Lo más largo que puede ser un límite diario, en minutos: uno de 24 h no limitaría nada. */
+const val MAX_MINUTOS_LIMITE = 24 * 60 - 1
+
+enum class TipoLimite(val clave: String) {
+    APP("app"),       // nombre = paquete de la app
+    SITIO("sitio"),   // nombre = dominio normalizado
+}
+
+/** Tiempo de uso permitido por día de una app o un sitio. */
+data class Limite(val tipo: TipoLimite, val nombre: String, val minutos: Int) {
+    /** Identifica el límite en el registro de uso: "app:com.instagram.android", "sitio:instagram.com". */
+    val clave: String get() = "${tipo.clave}:$nombre"
+}
+
 data class Estado(
     val activo: Boolean,
     /**
@@ -111,7 +125,14 @@ data class Config(
     val horarios: List<Horario> = emptyList(),
     val sesionFin: Instant? = null,             // cuándo termina la sesión (instante: no le afecta la zona horaria)
     val modoEstricto: Boolean = false,          // durante un bloqueo, bloquear también Ajustes y el desinstalador
+    val limites: List<Limite> = emptyList(),    // límites diarios, ordenados por tipo y nombre
 ) {
+    fun limite(tipo: TipoLimite, nombre: String): Limite? = limites.firstOrNull { it.tipo == tipo && it.nombre == nombre }
+
+    /** [limites] con [nuevo] (reemplaza al que tenga su misma app o sitio), en orden. */
+    fun conLimite(nuevo: Limite): Config =
+        copy(limites = ordenar(limites.filter { it.clave != nuevo.clave } + nuevo))
+
     fun estado(ahora: LocalDateTime = LocalDateTime.now(), zona: ZoneId = ZoneId.systemDefault()): Estado {
         val finales = mutableListOf<LocalDateTime>()
         val motivos = mutableListOf<String>()
@@ -180,6 +201,9 @@ data class Config(
             .put("horarios", horariosJson)
             .put("sesion_fin_ms", sesionFin?.toEpochMilli() ?: JSONObject.NULL)
             .put("modo_estricto", modoEstricto)
+            .put("limites", JSONArray(limites.map {
+                JSONObject().put("tipo", it.tipo.clave).put("nombre", it.nombre).put("minutos", it.minutos)
+            }))
             .toString()
     }
 
@@ -198,10 +222,32 @@ data class Config(
                     horarios = leerHorarios(o.optJSONArray("horarios")),
                     sesionFin = leerSesion(o),
                     modoEstricto = o.optBoolean("modo_estricto", false),
+                    limites = leerLimites(o.optJSONArray("limites")),
                 )
             } catch (e: JSONException) {
                 Config()
             }
+        }
+
+        internal fun ordenar(limites: List<Limite>): List<Limite> =
+            limites.sortedWith(compareBy({ it.tipo.ordinal }, { it.nombre }))
+
+        /** Descarta los límites dañados. Si una app o un sitio aparece dos veces, queda el más estricto. */
+        private fun leerLimites(a: JSONArray?): List<Limite> {
+            if (a == null) return emptyList()
+            val porClave = LinkedHashMap<String, Limite>()
+            for (i in 0 until a.length()) {
+                val o = a.optJSONObject(i) ?: continue
+                val tipo = TipoLimite.entries.firstOrNull { it.clave == o.optString("tipo") } ?: continue
+                // Los paquetes pueden tener mayúsculas (com.UCMobile.intl): solo los sitios van en minúsculas.
+                val nombre = o.optString("nombre", "").trim().let { if (tipo == TipoLimite.SITIO) it.lowercase() else it }
+                val minutos = o.optInt("minutos", 0)
+                if (nombre.isEmpty() || minutos !in 1..MAX_MINUTOS_LIMITE) continue
+                val nuevo = Limite(tipo, nombre, minutos)
+                val anterior = porClave[nuevo.clave]
+                if (anterior == null || minutos < anterior.minutos) porClave[nuevo.clave] = nuevo
+            }
+            return ordenar(porClave.values.toList())
         }
 
         private fun cadenas(a: JSONArray?): List<String> {

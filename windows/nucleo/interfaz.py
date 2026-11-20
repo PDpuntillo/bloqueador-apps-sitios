@@ -1,6 +1,7 @@
 """Ventana principal del Bloqueador (hecha con tkinter, que viene incluido con Python)."""
 from __future__ import annotations
 
+import math
 import os
 import tkinter as tk
 import traceback
@@ -9,8 +10,9 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
 from . import autoinicio, hosts, procesos
-from .config import DIAS, Almacen, Estado, Horario, normalizar_hora, registrar_error
+from .config import DIAS, MAX_MINUTOS_LIMITE, Almacen, Estado, Horario, Limite, normalizar_hora, registrar_error
 from .motor import Motor
+from .uso import Uso
 
 SITIOS_RAPIDOS = [
     ("YouTube", ["youtube.com"]),
@@ -25,8 +27,10 @@ SITIOS_RAPIDOS = [
 HORAS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 LIBRE = ("#E7F4EA", "#1E6B34")        # (fondo, texto)
 BLOQUEADO = ("#FBE9E7", "#B3261E")
+AVISO = ("#FFF4E5", "#8A4B00")
 GRIS = "#6B6B6B"
 INTERVALO_MS = 1000
+MAX_MINUTOS_SESION = 24 * 60
 SIN_PAUSA = "Con este horario el bloqueo no terminaría nunca: deja al menos un rato libre en la semana."
 AYUDA_SIN_FIN = ("Tus horarios cubren toda la semana sin pausa. Quita alguno en la pestaña "
                  "Horarios para que el bloqueo pueda terminar.")
@@ -60,6 +64,46 @@ def plural(n: int, singular: str, varios: str) -> str:
     return f"{n} {singular if n == 1 else varios}"
 
 
+def texto_minutos(total: int) -> str:
+    """'2 horas y 30 minutos', '1 hora' o '45 minutos'."""
+    h, m = divmod(total, 60)
+    partes = [plural(h, "hora", "horas")] if h else []
+    if m or not h:
+        partes.append(plural(m, "minuto", "minutos"))
+    return " y ".join(partes)
+
+
+def minutos_corto(total: int) -> str:
+    """'45 min', '2 h' o '1 h 30 min'."""
+    h, m = divmod(total, 60)
+    if not h:
+        return f"{m} min"
+    return f"{h} h {m} min" if m else f"{h} h"
+
+
+def minutos_elegidos(horas: str, minutos: str, maximo: int = MAX_MINUTOS_SESION) -> int | None:
+    """Minutos con lo escrito en las casillas de horas y minutos (vacía cuenta como 0).
+    None si no vale: los minutos van de 0 a 59 y el total, de 1 minuto a `maximo`."""
+    try:
+        h = int(horas.strip() or 0)
+        m = int(minutos.strip() or 0)
+    except ValueError:
+        return None
+    if not (0 <= h <= 24 and 0 <= m <= 59):
+        return None
+    total = h * 60 + m
+    return total if 1 <= total <= maximo else None
+
+
+def describir_limite(limite: Limite, uso: Uso) -> str:
+    """'instagram.com  ·  30 min por día  ·  hoy 12 min, quedan 18 min'."""
+    texto = f"{limite.nombre}  ·  {minutos_corto(limite.minutos)} por día  ·  "
+    if uso.agotado(limite):
+        return texto + "se acabó por hoy"
+    usados = int(uso.usados(limite) // 60)
+    return texto + f"hoy {usados} min, quedan {minutos_corto(math.ceil(uso.restantes(limite) / 60))}"
+
+
 def icono(raiz: tk.Misc, tam: int = 32) -> tk.PhotoImage:
     """Dibuja un ícono de 'prohibido' (círculo rojo con barra blanca)."""
     img = tk.PhotoImage(master=raiz, width=tam, height=tam)
@@ -90,7 +134,10 @@ class Lista(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-    def mostrar(self, elementos: list[str]) -> None:
+    def mostrar(self, elementos: list[str], conservar: bool = False) -> None:
+        """Muestra `elementos`. Con `conservar`, mantiene la selección y el desplazamiento."""
+        seleccion = self.seleccion() if conservar else []
+        arriba = self.lb.yview()[0]
         self.lb.delete(0, "end")
         self.vacia = not elementos
         if self.vacia:
@@ -99,6 +146,11 @@ class Lista(ttk.Frame):
             self.lb.itemconfig(0, foreground=GRIS, selectforeground=GRIS, selectbackground=fondo)
         for e in elementos:
             self.lb.insert("end", "  " + e)
+        if conservar:
+            for i in seleccion:
+                if i < len(elementos):
+                    self.lb.selection_set(i)
+            self.lb.yview_moveto(arriba)
 
     def seleccion(self) -> list[int]:
         return [] if self.vacia else [int(i) for i in self.lb.curselection()]
@@ -114,6 +166,7 @@ class App(tk.Tk):
         self.toast: tk.Toplevel | None = None
         self._avisos: dict[str, datetime] = {}
         self._ultimo_error = ""
+        self._textos_limites: list[str] = []
         self.escala = self.winfo_fpixels("1i") / 96
 
         self.title("Bloqueador")
@@ -132,6 +185,7 @@ class App(tk.Tk):
         self._pestana_sitios()
         self._pestana_apps()
         self._pestana_horarios()
+        self._pestana_limites()
         self._pestana_ajustes()
 
         self._refrescar_listas()
@@ -169,10 +223,13 @@ class App(tk.Tk):
         marco = ttk.LabelFrame(self, text=" Sesión de concentración ", padding=(12, 8))
         marco.pack(fill="x", padx=14, pady=(12, 0))
         ttk.Label(marco, text="Bloquear durante").pack(side="left")
-        self.var_minutos = tk.StringVar(value="60")
-        ttk.Combobox(marco, textvariable=self.var_minutos, width=6,
-                     values=["15", "25", "30", "45", "60", "90", "120", "180", "240"]
-                     ).pack(side="left", padx=6)
+        self.var_horas = tk.StringVar(value="1")
+        ttk.Spinbox(marco, textvariable=self.var_horas, from_=0, to=24, width=4
+                    ).pack(side="left", padx=(6, 4))
+        ttk.Label(marco, text="horas").pack(side="left")
+        self.var_minutos = tk.StringVar(value="0")
+        ttk.Spinbox(marco, textvariable=self.var_minutos, from_=0, to=55, increment=5, width=4
+                    ).pack(side="left", padx=(10, 4))
         ttk.Label(marco, text="minutos").pack(side="left")
         self.btn_sesion = ttk.Button(marco, text="Iniciar bloqueo", style="Accion.TButton",
                                      command=self._iniciar_sesion)
@@ -256,6 +313,46 @@ class App(tk.Tk):
         self.lista_horarios.pack(fill="both", expand=True)
         self.btn_quitar_horario, self.lbl_cuenta_horarios = self._fila_quitar(tab, self._quitar_horarios)
 
+    def _pestana_limites(self) -> None:
+        tab = ttk.Frame(self.nb, padding=12)
+        self.nb.add(tab, text="Límites diarios")
+        form = ttk.Frame(tab)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text="Límite para").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        tipos = ttk.Frame(form)
+        tipos.grid(row=0, column=1, sticky="w")
+        self.var_tipo_limite = tk.StringVar(value="sitio")
+        ttk.Radiobutton(tipos, text="un sitio web", value="sitio", variable=self.var_tipo_limite,
+                        command=lambda: self.cmb_limite.set("")).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(tipos, text="una aplicación", value="app", variable=self.var_tipo_limite,
+                        command=lambda: self.cmb_limite.set("")).pack(side="left")
+        self.cmb_limite = ttk.Combobox(form, postcommand=self._cargar_opciones_limite)
+        self.cmb_limite.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0), ipady=2)
+        self.cmb_limite.bind("<Return>", lambda _e: self._agregar_limite())
+
+        fila = ttk.Frame(form)
+        fila.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(fila, text="Máximo por día").pack(side="left")
+        self.var_lim_horas = tk.StringVar(value="0")
+        ttk.Spinbox(fila, textvariable=self.var_lim_horas, from_=0, to=23, width=4
+                    ).pack(side="left", padx=(6, 4))
+        ttk.Label(fila, text="horas").pack(side="left")
+        self.var_lim_minutos = tk.StringVar(value="30")
+        ttk.Spinbox(fila, textvariable=self.var_lim_minutos, from_=0, to=55, increment=5, width=4
+                    ).pack(side="left", padx=(10, 4))
+        ttk.Label(fila, text="minutos").pack(side="left")
+        ttk.Button(fila, text="Agregar límite", command=self._agregar_limite).pack(side="right")
+
+        ttk.Label(tab, style="Ayuda.TLabel", justify="left", wraplength=self.px(580),
+                  text="Cuenta el tiempo que la app o el sitio está en primer plano. Cuando se acaba, "
+                       "queda bloqueado hasta las 00:00. Los sitios se reconocen por el título de la "
+                       "pestaña (por ejemplo «Instagram» o «YouTube»). Un límite agotado no se puede "
+                       "quitar ni aumentar hasta el día siguiente.").pack(anchor="w", pady=(8, 8))
+        self.lista_limites = Lista(tab, "No hay límites diarios.")
+        self.lista_limites.pack(fill="both", expand=True)
+        self.btn_quitar_limite, self.lbl_cuenta_limites = self._fila_quitar(tab, self._quitar_limites)
+
     def _pestana_ajustes(self) -> None:
         tab = ttk.Frame(self.nb, padding=14)
         self.nb.add(tab, text="Ajustes")
@@ -274,6 +371,8 @@ class App(tk.Tk):
             "•  Las aplicaciones bloqueadas se cierran en cuanto se abren.\n"
             "•  Durante un bloqueo puedes agregar sitios, apps u horarios, pero no quitarlos "
             "ni cerrar el programa.\n"
+            "•  Con un límite diario, la app o el sitio se bloquea al acabarse su tiempo, hasta las "
+            "00:00. Mientras tanto el programa tampoco se puede cerrar.\n"
             "•  Si una página ya estaba abierta, puede tardar un poco en bloquearse: recárgala.")
         ).pack(anchor="w")
         ttk.Label(tab, style="Ayuda.TLabel", justify="left", wraplength=ancho,
@@ -294,6 +393,15 @@ class App(tk.Tk):
                 registrar_error(detalle)
         for nombre in cerradas:
             self._avisar(nombre, ahora)
+        for sitio in self.motor.pestanas_cerradas:
+            limite = self.almacen.cfg.limite("sitio", sitio)
+            self._pie(f"{ahora:%H:%M:%S} · Se cerró la pestaña de {sitio}: se acabó su tiempo de hoy.")
+            self._toast(f"sitio:{sitio}", f"Se acabó el tiempo de {sitio}",
+                        f"Usaste los {minutos_corto(limite.minutos)} de hoy. Vuelve a estar disponible mañana."
+                        if limite else "Vuelve a estar disponible mañana.", ahora)
+        for limite in self.motor.por_agotarse:
+            self._toast(f"aviso:{limite.clave}", f"Te quedan 5 minutos de {limite.nombre}",
+                        "Después se bloquea hasta mañana.", ahora, colores=AVISO)
         self._actualizar_vista(ahora)
         if repetir:
             self.after(INTERVALO_MS, self._ciclo)
@@ -319,19 +427,26 @@ class App(tk.Tk):
             detalle = (f"Próximo horario: {cuando(prox, ahora)}." if prox
                        else "Inicia una sesión de concentración o programa un horario.")
             self.title("Bloqueador" + (" (modo prueba)" if self.modo_prueba else ""))
+        agotados = self.motor.agotados
+        if agotados:
+            detalle += (f"\nSe acabó el tiempo de hoy de {', '.join(l.nombre for l in agotados)} "
+                        "(bloqueado hasta las 00:00).")
         if self.motor.error:
             detalle += f"\nAtención: {self.motor.error}"
         resumen = " · ".join([plural(len(cfg.sitios), "sitio", "sitios"),
                               plural(len(cfg.apps), "aplicación", "aplicaciones"),
-                              plural(len(cfg.horarios), "horario", "horarios")])
+                              plural(len(cfg.horarios), "horario", "horarios"),
+                              plural(len(cfg.limites), "límite diario", "límites diarios")])
         self.banner.config(bg=fondo)
         self.lbl_titulo.config(text=titulo, bg=fondo, fg=color)
         self.lbl_detalle.config(text=detalle, bg=fondo, fg="#B3261E" if self.motor.error else "#2B2B2B")
         self.lbl_resumen.config(text=resumen, bg=fondo, fg=GRIS)
 
         bloqueo = ["disabled"] if e.activo else ["!disabled"]
-        for boton in (self.btn_quitar_sitio, self.btn_quitar_app, self.btn_salir):
+        for boton in (self.btn_quitar_sitio, self.btn_quitar_app, self.btn_quitar_limite):
             boton.state(bloqueo)
+        self.btn_salir.state(["disabled"] if e.activo or agotados else ["!disabled"])
+        self._mostrar_limites()
         # Salida para configuraciones viejas sin pausa: ahí los horarios sí se pueden quitar.
         self.btn_quitar_horario.state(["disabled"] if e.activo and not e.permanente else ["!disabled"])
         self.chk_auto.state(["disabled"] if e.activo and self.var_auto.get() else ["!disabled"])
@@ -345,6 +460,15 @@ class App(tk.Tk):
         self.lbl_cuenta_sitios.config(text=plural(len(cfg.sitios), "sitio", "sitios"))
         self.lbl_cuenta_apps.config(text=plural(len(cfg.apps), "aplicación", "aplicaciones"))
         self.lbl_cuenta_horarios.config(text=plural(len(cfg.horarios), "horario", "horarios"))
+        self.lbl_cuenta_limites.config(text=plural(len(cfg.limites), "límite", "límites"))
+        self._mostrar_limites(forzar=True)
+
+    def _mostrar_limites(self, forzar: bool = False) -> None:
+        """Muestra los límites con el tiempo de hoy. Solo redibuja la lista si cambió algún texto."""
+        textos = [describir_limite(l, self.motor.uso.datos) for l in self.almacen.cfg.limites]
+        if forzar or textos != self._textos_limites:
+            self._textos_limites = textos
+            self.lista_limites.mostrar(textos, conservar=not forzar)
 
     def _pie(self, texto: str) -> None:
         self.lbl_pie.config(text=texto)
@@ -378,14 +502,28 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- avisos
     def _avisar(self, nombre: str, ahora: datetime) -> None:
-        self._pie(f"{ahora:%H:%M:%S} · Se cerró {nombre} porque está bloqueado.")
+        """Se cerró la app `nombre`: por un bloqueo o porque se acabó su tiempo de hoy."""
         clave = nombre.lower()
+        limite = next((l for l in self.motor.agotados if l.tipo == "app" and l.nombre == clave), None)
+        if limite and not (self.estado.activo and clave in self.almacen.cfg.apps):
+            self._pie(f"{ahora:%H:%M:%S} · Se cerró {nombre}: se acabó su tiempo de hoy.")
+            self._toast(f"app:{clave}", f"Se acabó el tiempo de {nombre}",
+                        f"Usaste los {minutos_corto(limite.minutos)} de hoy. Vuelve a estar disponible mañana.",
+                        ahora)
+            return
+        self._pie(f"{ahora:%H:%M:%S} · Se cerró {nombre} porque está bloqueado.")
+        texto = f"El bloqueo sigue {hasta_texto(self.estado, ahora)}." if self.estado.activo else None
+        self._toast(f"app:{clave}", f"{nombre} está bloqueado", texto, ahora)
+
+    def _toast(self, clave: str, titulo: str, texto: str | None, ahora: datetime,
+               colores: tuple[str, str] = BLOQUEADO) -> None:
+        """Aviso flotante abajo a la derecha. El mismo aviso no se repite antes de 20 s."""
         ultimo = self._avisos.get(clave)
-        if ultimo and (ahora - ultimo).total_seconds() < 20:
+        if ultimo and 0 <= (ahora - ultimo).total_seconds() < 20:
             return
         self._avisos[clave] = ahora
         self._cerrar_toast(self.toast)
-        fondo, color = BLOQUEADO
+        fondo, color = colores
         t = tk.Toplevel(self)
         self.toast = t
         t.overrideredirect(True)
@@ -394,11 +532,9 @@ class App(tk.Tk):
         borde.pack()
         caja = tk.Frame(borde, bg=fondo, padx=16, pady=10)
         caja.pack()
-        tk.Label(caja, text=f"{nombre} está bloqueado", bg=fondo, fg=color,
-                 font=("Segoe UI Semibold", 11)).pack(anchor="w")
-        if self.estado.activo:
-            tk.Label(caja, text=f"El bloqueo sigue {hasta_texto(self.estado, ahora)}.",
-                     bg=fondo, fg="#3A3A3A", font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(caja, text=titulo, bg=fondo, fg=color, font=("Segoe UI Semibold", 11)).pack(anchor="w")
+        if texto:
+            tk.Label(caja, text=texto, bg=fondo, fg="#3A3A3A", font=("Segoe UI", 10)).pack(anchor="w")
         t.update_idletasks()
         x = t.winfo_screenwidth() - t.winfo_reqwidth() - self.px(24)
         y = t.winfo_screenheight() - t.winfo_reqheight() - self.px(72)
@@ -417,13 +553,10 @@ class App(tk.Tk):
 
     # -------------------------------------------------------------- acciones
     def _iniciar_sesion(self) -> None:
-        try:
-            minutos = int(self.var_minutos.get().strip())
-        except ValueError:
-            minutos = 0
-        if not 1 <= minutos <= 24 * 60:
-            messagebox.showwarning("Duración no válida", "Escribe un número de minutos entre 1 y 1440.",
-                                   parent=self)
+        minutos = minutos_elegidos(self.var_horas.get(), self.var_minutos.get())
+        if minutos is None:
+            messagebox.showwarning("Duración no válida",
+                                   "Elige entre 1 minuto y 24 horas (los minutos van de 0 a 59).", parent=self)
             return
         cfg = self.almacen.cfg
         if not cfg.sitios and not cfg.apps:
@@ -437,7 +570,7 @@ class App(tk.Tk):
         # Fin real: si al terminar la sesión sigue un horario sin pausa, dura hasta el fin de ese.
         previsto = replace(cfg, sesion_fin=fin.isoformat(timespec="seconds")).estado(ahora)
         que = f"{plural(len(cfg.sitios), 'sitio', 'sitios')} y {plural(len(cfg.apps), 'aplicación', 'aplicaciones')}"
-        texto = f"Se bloquearán {que} durante {plural(minutos, 'minuto', 'minutos')}, hasta {cuando(fin, ahora)}."
+        texto = f"Se bloquearán {que} durante {texto_minutos(minutos)}, hasta {cuando(fin, ahora)}."
         if previsto.permanente or (previsto.hasta and previsto.hasta > fin):
             texto += (f"\nJusto después sigue un horario, así que el bloqueo durará "
                       f"{hasta_texto(previsto, ahora)}.")
@@ -581,6 +714,82 @@ class App(tk.Tk):
         cfg.horarios = [h for i, h in enumerate(cfg.horarios) if i not in indices]
         self._guardar_y_aplicar()
 
+    def _cargar_opciones_limite(self) -> None:
+        if self.var_tipo_limite.get() == "app":
+            self.cmb_limite["values"] = procesos.nombres_en_ejecucion()
+        else:
+            self.cmb_limite["values"] = [d for _, dominios in SITIOS_RAPIDOS for d in dominios]
+
+    def _no_se_puede_aflojar(self, limites: list[Limite], accion: str) -> bool:
+        """Quitar o aumentar un límite solo se puede sin bloqueo activo y si hoy no se agotó."""
+        if self.almacen.cfg.estado().activo:
+            messagebox.showwarning("Bloqueo activo", f"No puedes {accion} límites mientras el bloqueo "
+                                   "está activo. Espera a que termine.", parent=self)
+            return True
+        agotados = [l.nombre for l in limites if self.motor.uso.datos.agotado(l)]
+        if agotados:
+            messagebox.showwarning("Tiempo agotado", f"Hoy ya se acabó el tiempo de {', '.join(agotados)}. "
+                                   f"Podrás {accion} su límite mañana.", parent=self)
+            return True
+        return False
+
+    def _agregar_limite(self) -> None:
+        tipo = self.var_tipo_limite.get()
+        texto = self.cmb_limite.get().strip()
+        if not texto:
+            self.cmb_limite.focus_set()
+            return
+        if tipo == "sitio":
+            nombre = hosts.normalizar_dominio(texto)
+            if not nombre:
+                messagebox.showwarning("Dirección no válida",
+                                       f"«{texto}» no parece una dirección web. Ejemplo: instagram.com", parent=self)
+                return
+        else:
+            nombre, error = procesos.normalizar_app(texto)
+            if error or not nombre:
+                messagebox.showwarning("No se puede agregar", error or "Nombre no válido.", parent=self)
+                return
+        minutos = minutos_elegidos(self.var_lim_horas.get(), self.var_lim_minutos.get(), MAX_MINUTOS_LIMITE)
+        if minutos is None:
+            messagebox.showwarning("Tiempo no válido", "Elige entre 1 minuto y 23 horas y 59 minutos por día "
+                                   "(los minutos van de 0 a 59).", parent=self)
+            return
+        cfg = self.almacen.cfg
+        nuevo = Limite(tipo, nombre, minutos)
+        actual = cfg.limite(tipo, nombre)
+        if actual and actual.minutos == minutos:
+            self._pie("Ese límite ya existe.")
+            return
+        if actual and minutos > actual.minutos and self._no_se_puede_aflojar([actual], "aumentar"):
+            return
+        uso = self.motor.uso.datos
+        if uso.agotado(nuevo) and not (actual and uso.agotado(actual)):
+            usados = texto_minutos(int(uso.usados(nuevo) // 60))
+            if not messagebox.askyesno("Se bloqueará ahora",
+                                       f"Hoy ya usaste {nombre} {usados}: con este límite se bloqueará de "
+                                       "inmediato hasta mañana y no podrás quitarlo hasta entonces.\n\n¿Agregarlo?",
+                                       icon="warning", parent=self):
+                return
+        cfg.limites = sorted([l for l in cfg.limites if l.clave != nuevo.clave] + [nuevo],
+                             key=lambda l: (l.tipo, l.nombre))
+        self.cmb_limite.set("")
+        self._guardar_y_aplicar()
+        self._pie(f"Límite {'cambiado' if actual else 'agregado'}: {nombre}, "
+                  f"{minutos_corto(minutos)} por día.")
+
+    def _quitar_limites(self) -> None:
+        cfg = self.almacen.cfg
+        quitar = [cfg.limites[i] for i in self.lista_limites.seleccion() if i < len(cfg.limites)]
+        if not quitar:
+            self._pie("Selecciona uno o más límites para quitar.")
+            return
+        if self._no_se_puede_aflojar(quitar, "quitar"):
+            return
+        claves = {l.clave for l in quitar}
+        cfg.limites = [l for l in cfg.limites if l.clave not in claves]
+        self._guardar_y_aplicar()
+
     def _sincronizar_autoinicio(self) -> None:
         if self.modo_prueba:
             return
@@ -621,15 +830,24 @@ class App(tk.Tk):
                                 "El Bloqueador se minimizará y seguirá funcionando.", parent=self)
             self.iconify()
             return
+        if self.motor.hay_agotados():
+            nombres = ", ".join(l.nombre for l in self.motor.agotados)
+            messagebox.showinfo("Tiempo agotado",
+                                f"Hoy se acabó el tiempo de {nombres}.\n"
+                                "El Bloqueador se minimizará y seguirá funcionando hasta las 00:00.", parent=self)
+            self.iconify()
+            return
         self._salir()
 
     def _salir(self) -> None:
         cfg = self.almacen.cfg
-        if cfg.estado().activo:
+        if cfg.estado().activo or self.motor.hay_agotados():
             return
         texto = "¿Cerrar el Bloqueador?"
-        if cfg.horarios:
-            texto += "\n\nMientras esté cerrado no se aplicarán tus horarios"
+        if cfg.horarios or cfg.limites:
+            que = " ni ".join(x for x, hay in (("tus horarios", cfg.horarios),
+                                                ("tus límites diarios", cfg.limites)) if hay)
+            texto += f"\n\nMientras esté cerrado no se aplicarán {que}"
             texto += (" (volverá a abrirse cuando inicies sesión en Windows)." if self.var_auto.get() else ".")
         if not messagebox.askyesno("Salir", texto, parent=self):
             return

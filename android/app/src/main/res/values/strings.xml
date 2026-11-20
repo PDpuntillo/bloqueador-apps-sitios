@@ -2,9 +2,9 @@
 <resources>
     <string name="app_name">Bloqueador</string>
     <string name="servicio_accesibilidad">Bloqueador: bloqueo de apps</string>
-    <string name="descripcion_accesibilidad">Detecta qué aplicación abres y, si la bloqueaste, la tapa con la pantalla de bloqueo durante una sesión de concentración o un horario. No lee ni guarda lo que escribes ni lo que ves en pantalla.</string>
+    <string name="descripcion_accesibilidad">Detecta qué aplicación abres y, si la bloqueaste, la tapa con la pantalla de bloqueo durante una sesión de concentración o un horario, o cuando se acaba su tiempo diario. Si pones un límite diario a un sitio web, también lee la barra de direcciones del navegador para saber qué sitio estás viendo. No guarda lo que escribes, lo que ves en pantalla ni las páginas que visitas.</string>
     <!-- Android 11+: explica el botón de accesibilidad que aparece al activar el servicio. -->
-    <string name="descripcion_accesibilidad_boton">Detecta qué aplicación abres y, si la bloqueaste, la tapa con la pantalla de bloqueo durante una sesión de concentración o un horario. No lee ni guarda lo que escribes ni lo que ves en pantalla. Su botón de accesibilidad no hace nada: está para que el atajo de accesibilidad no pueda apagar el bloqueo.</string>
+    <string name="descripcion_accesibilidad_boton">Detecta qué aplicación abres y, si la bloqueaste, la tapa con la pantalla de bloqueo durante una sesión de concentración o un horario, o cuando se acaba su tiempo diario. Si pones un límite diario a un sitio web, también lee la barra de direcciones del navegador para saber qué sitio estás viendo. No guarda lo que escribes, lo que ves en pantalla ni las páginas que visitas. Su botón de accesibilidad no hace nada: está para que el atajo de accesibilidad no pueda apagar el bloqueo.</string>
     <!-- Protección contra desinstalación (administrador de dispositivo sin políticas). -->
     <string name="admin_dispositivo">Bloqueador: protección contra desinstalación</string>
     <string name="descripcion_admin_dispositivo">Impide desinstalar Bloqueador mientras esté activa. No usa ninguna función de administrador: no puede bloquear el teléfono, borrar datos ni ver lo que haces.</string>

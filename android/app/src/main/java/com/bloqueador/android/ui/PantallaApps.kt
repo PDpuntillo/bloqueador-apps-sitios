@@ -78,7 +78,7 @@ import java.text.Normalizer
 import java.time.LocalDateTime
 
 /** Tamaño de los íconos de las apps en pantalla. Se cargan a este tamaño en píxeles reales. */
-private val TAM_ICONO = 40.dp
+internal val TAM_ICONO = 40.dp
 
 /** Tiempo que se guardan los íconos después de salir de la pestaña Apps. */
 private const val GUARDAR_ICONOS_MS = 10 * 60_000L
@@ -86,7 +86,7 @@ private const val GUARDAR_ICONOS_MS = 10 * 60_000L
 private val MARCAS_DIACRITICAS = Regex("\\p{Mn}+")
 
 /** "Cámara" -> "camara": minúsculas y sin tildes, para buscar. */
-private fun claveBusqueda(texto: String): String =
+internal fun claveBusqueda(texto: String): String =
     MARCAS_DIACRITICAS.replace(Normalizer.normalize(texto, Normalizer.Form.NFD), "").lowercase()
 
 /**
@@ -170,6 +170,12 @@ class CatalogoApps {
     val lista: ListaApps? get() = CacheApps.lista
     val fallo: Boolean get() = CacheApps.fallo
     val recargando: Boolean get() = CacheApps.recargando
+
+    /** Se llama en el hilo principal al entrar en una pestaña que muestra apps. */
+    fun enUso() = CacheApps.enUso()
+
+    /** Se llama en el hilo principal al salir de esa pestaña: los íconos se sueltan un rato después. */
+    fun sinUso() = CacheApps.sinUso()
 
     /**
      * Vuelve a leer las apps en segundo plano. De las que ya estaban reutiliza el nombre y el
@@ -498,7 +504,7 @@ private fun FilaApp(app: AppInstalada, marcada: Boolean, habilitada: Boolean, on
 }
 
 @Composable
-private fun IconoApp(app: AppInstalada) {
+internal fun IconoApp(app: AppInstalada) {
     val icono = app.icono
     if (icono != null) {
         Image(bitmap = icono, contentDescription = null, modifier = Modifier.size(TAM_ICONO))

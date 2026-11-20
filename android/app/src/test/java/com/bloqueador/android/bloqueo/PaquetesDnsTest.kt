@@ -446,6 +446,20 @@ class PaquetesDnsTest {
     }
 
     @Test
+    fun sitiosSinTiempoSeBloqueanConOSinBloqueo() {
+        val agotados = setOf("instagram.com")
+        assertTrue(PaquetesDns.bloquearConsulta("www.instagram.com", false, emptySet(), agotados = agotados))
+        assertTrue(PaquetesDns.bloquearConsulta("instagram.com", true, emptySet(), agotados = agotados))
+        assertFalse(PaquetesDns.bloquearConsulta("www.youtube.com", false, setOf("youtube.com"), agotados = agotados))
+        // Mientras haya un sitio sin tiempo, el «DNS seguro» del navegador tampoco puede saltarse el filtro.
+        assertTrue(PaquetesDns.bloquearConsulta("dns.google", false, emptySet(), agotados = agotados))
+        assertFalse(PaquetesDns.bloquearConsulta("dns.google", false, emptySet()))
+        // El DNS privado del sistema, nunca.
+        assertFalse(PaquetesDns.bloquearConsulta("dns.google", false, emptySet(), "dns.google", agotados))
+        assertFalse(PaquetesDns.bloquearConsulta("www.google.com", false, emptySet(), agotados = agotados))
+    }
+
+    @Test
     fun losServidoresDohSonDominiosNormalizados() {
         for (s in PaquetesDns.SERVIDORES_DOH) assertEquals(s, Dominios.normalizar(s))
         assertEquals(PaquetesDns.CANARIO_FIREFOX, Dominios.normalizar(PaquetesDns.CANARIO_FIREFOX))

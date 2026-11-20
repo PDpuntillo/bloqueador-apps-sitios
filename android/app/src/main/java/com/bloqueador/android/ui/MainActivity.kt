@@ -88,11 +88,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Las cinco pestañas de la barra inferior. */
+/** Las seis pestañas de la barra inferior. */
 private enum class Destino(val etiqueta: String, val titulo: String, val icono: ImageVector) {
     INICIO("Inicio", "Bloqueador", Icons.Filled.Home),
     APPS("Apps", "Aplicaciones", Icons.Filled.Lock),
     SITIOS("Sitios", "Sitios web", Icons.AutoMirrored.Filled.List),
+    LIMITES("Límites", "Límites diarios", IconoLimite),
     HORARIOS("Horarios", "Horarios", Icons.Filled.DateRange),
     AJUSTES("Ajustes", "Ajustes", Icons.Filled.Settings),
 }
@@ -209,6 +210,16 @@ fun AppBloqueador(visible: Boolean, reanudaciones: Int) {
                 Destino.SITIOS -> PantallaSitios(
                     config = config,
                     bloqueado = estado.activo,
+                    avisar = avisar,
+                    modifier = contenido,
+                )
+                Destino.LIMITES -> PantallaLimites(
+                    config = config,
+                    bloqueado = estado.activo,
+                    ahora = ahora,
+                    servicios = servicios,
+                    catalogo = catalogo,
+                    reanudaciones = reanudaciones,
                     avisar = avisar,
                     modifier = contenido,
                 )

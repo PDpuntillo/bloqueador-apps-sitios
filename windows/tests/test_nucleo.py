@@ -1,4 +1,4 @@
-"""Pruebas del núcleo. Desde la carpeta windows:  python -m unittest -v
+"""Pruebas del núcleo. Desde la carpeta windows:  python -m unittest discover -s tests -v
 
 No tocan el archivo hosts real: usan archivos temporales.
 """
@@ -14,9 +14,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nucleo import hosts, procesos  # noqa: E402
-from nucleo.config import Almacen, Config, Estado, Horario, normalizar_hora  # noqa: E402
+from nucleo import hosts, procesos, uso  # noqa: E402
+from nucleo.config import Almacen, Config, Estado, Horario, Limite, normalizar_hora  # noqa: E402
 from nucleo.motor import Motor  # noqa: E402
+from nucleo.uso import Uso  # noqa: E402
 
 try:
     from nucleo import interfaz  # noqa: E402  (necesita tkinter)
@@ -309,7 +310,7 @@ class TestInterfazHorarios(unittest.TestCase):
     def ventana(self, cfg: Config):
         """Un objeto con lo mínimo que usan los métodos de App, sin abrir ninguna ventana."""
         v = types.SimpleNamespace(almacen=types.SimpleNamespace(cfg=cfg), _pie=mock.Mock(),
-                                  _guardar_y_aplicar=mock.Mock(), var_minutos=Valor("15"),
+                                  _guardar_y_aplicar=mock.Mock(), var_horas=Valor("0"), var_minutos=Valor("15"),
                                   var_dias=[Valor(True)] * 7, var_ini=Valor("09:00"), var_fin=Valor("17:00"))
         for nombre in ("_hay_bloqueo", "_ya_hay_bloqueo_mas_largo"):
             setattr(v, nombre, types.MethodType(getattr(interfaz.App, nombre), v))
@@ -370,6 +371,41 @@ class TestInterfazHorarios(unittest.TestCase):
             interfaz.App._iniciar_sesion(v)
         self.assertEqual(cfg.sesion_fin, "2026-11-16T10:35:00")   # mismo formato que antes
         v._guardar_y_aplicar.assert_called_once()
+
+    def test_minutos_elegidos(self):
+        casos = {("1", "0"): 60, ("2", "30"): 150, ("0", "45"): 45, ("", "20"): 20, ("3", ""): 180,
+                 (" 24 ", "0"): 1440, ("0", "1"): 1,
+                 ("0", "0"): None, ("", ""): None, ("24", "1"): None, ("25", "0"): None,
+                 ("1", "60"): None, ("-1", "30"): None, ("1,5", "0"): None, ("dos", "0"): None}
+        for (horas, minutos), esperado in casos.items():
+            self.assertEqual(interfaz.minutos_elegidos(horas, minutos), esperado, (horas, minutos))
+
+    def test_texto_minutos(self):
+        casos = {1: "1 minuto", 45: "45 minutos", 60: "1 hora", 61: "1 hora y 1 minuto",
+                 150: "2 horas y 30 minutos", 1440: "24 horas"}
+        for total, esperado in casos.items():
+            self.assertEqual(interfaz.texto_minutos(total), esperado)
+
+    def test_sesion_en_horas_y_minutos(self):
+        cfg = Config(sitios=["youtube.com"])
+        v = self.ventana(cfg)
+        v.var_horas, v.var_minutos = Valor("2"), Valor("30")
+        with mock.patch.object(interfaz, "datetime", Reloj(LUNES.replace(hour=10))), \
+                mock.patch.object(interfaz.messagebox, "askyesno", return_value=True) as pregunta:
+            interfaz.App._iniciar_sesion(v)
+        self.assertIn("durante 2 horas y 30 minutos, hasta hoy a las 12:30", pregunta.call_args.args[1])
+        self.assertEqual(cfg.sesion_fin, "2026-11-16T12:30:00")
+
+    def test_sesion_rechaza_duracion_no_valida(self):
+        cfg = Config(sitios=["youtube.com"])
+        v = self.ventana(cfg)
+        v.var_horas, v.var_minutos = Valor("24"), Valor("30")
+        with mock.patch.object(interfaz.messagebox, "showwarning") as aviso, \
+                mock.patch.object(interfaz.messagebox, "askyesno") as pregunta:
+            interfaz.App._iniciar_sesion(v)
+        aviso.assert_called_once()
+        pregunta.assert_not_called()
+        self.assertIsNone(cfg.sesion_fin)
 
     def test_sesion_muestra_el_fin_real_si_sigue_un_horario(self):
         cfg = Config(sitios=["youtube.com"], horarios=[Horario([0], "10:15", "12:00")])
@@ -467,6 +503,298 @@ class TestMotor(unittest.TestCase):
             finally:
                 if ping.poll() is None:
                     ping.kill()
+
+
+class TestTitulos(unittest.TestCase):
+    def test_palabra_clave(self):
+        casos = {"instagram.com": "instagram", "mercadolibre.com.ar": "mercadolibre", "bbc.co.uk": "bbc",
+                 "web.whatsapp.com": "whatsapp", "x.com": "x", "twitch.tv": "twitch"}
+        for dominio, esperado in casos.items():
+            with self.subTest(dominio=dominio):
+                self.assertEqual(uso.palabra_clave(dominio), esperado)
+
+    def test_reconoce_el_sitio_por_el_titulo(self):
+        casos = [
+            ("instagram.com", "Instagram - Google Chrome"),
+            ("instagram.com", "Ana (@ana) • Fotos y videos de Instagram — Mozilla Firefox"),
+            ("youtube.com", "(3) Gatitos - YouTube - Google Chrome"),
+            ("youtube.com", "Gatitos - YouTube y 2 páginas más - Personal: Microsoft Edge"),
+            ("reddit.com", "reddit.com/r/python - Brave"),
+            ("x.com", "(20) Inicio / X - Google Chrome"),
+            ("x.com", "Ana en X: \"hola\" / X y 3 páginas más - Personal - Microsoft Edge"),
+            ("x.com", "X"),
+        ]
+        for dominio, titulo in casos:
+            with self.subTest(titulo=titulo):
+                self.assertTrue(uso.titulo_coincide(dominio, titulo))
+
+    def test_no_confunde_otros_titulos(self):
+        casos = [
+            ("instagram.com", "Instagrammers famosos - Google Chrome"),
+            ("youtube.com", "Nueva pestaña - Google Chrome"),
+            ("x.com", "Oferta 3 x 2 en zapatillas - Google Chrome"),
+            ("x.com", "Xbox - Google Chrome"),
+            ("x.com", "dropbox.com - Google Chrome"),
+            ("facebook.com", "Inicio / X - Google Chrome"),
+        ]
+        for dominio, titulo in casos:
+            with self.subTest(titulo=titulo):
+                self.assertFalse(uso.titulo_coincide(dominio, titulo))
+
+    def test_limites_en_uso(self):
+        limites = [Limite("app", "discord.exe", 30), Limite("sitio", "youtube.com", 30)]
+        self.assertEqual(uso.limites_en_uso(limites, "discord.exe", "Discord"), [limites[0]])
+        self.assertEqual(uso.limites_en_uso(limites, "chrome.exe", "Gatitos - YouTube"), [limites[1]])
+        # Solo en los navegadores: la app de escritorio de YouTube Music no cuenta como el sitio.
+        self.assertEqual(uso.limites_en_uso(limites, "notas.exe", "YouTube - Notas"), [])
+
+
+class TestLimites(unittest.TestCase):
+    def test_guardar_y_cargar(self):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = os.path.join(d, "config.json")
+            alm = Almacen(ruta)
+            alm.cfg.limites = [Limite("app", "discord.exe", 45), Limite("sitio", "instagram.com", 30)]
+            alm.guardar()
+            self.assertEqual(Almacen(ruta).cfg.limites, alm.cfg.limites)
+
+    def test_descarta_limites_no_validos_y_deja_el_mas_estricto(self):
+        cfg = Config.desde_dict({"limites": [
+            {"tipo": "sitio", "nombre": "Instagram.com", "minutos": 30},
+            {"tipo": "sitio", "nombre": "instagram.com", "minutos": 20},
+            {"tipo": "sitio", "nombre": "youtube.com", "minutos": 0},
+            {"tipo": "carpeta", "nombre": "x", "minutos": 10},
+            {"tipo": "app", "minutos": 10},
+            {"tipo": "app", "nombre": "steam.exe", "minutos": "mucho"},
+        ]})
+        self.assertEqual(cfg.limites, [Limite("sitio", "instagram.com", 20)])
+
+    def test_uso_del_dia(self):
+        l = Limite("sitio", "instagram.com", 1)
+        u = Uso()
+        self.assertTrue(u.al_dia(LUNES.date()))
+        u.sumar(l, 59)
+        self.assertFalse(u.agotado(l))
+        self.assertEqual(u.restantes(l), 1)
+        u.sumar(l, 1)
+        self.assertTrue(u.agotado(l))
+        self.assertFalse(u.al_dia(LUNES.date()))
+        self.assertTrue(u.agotado(l))
+        self.assertTrue(u.al_dia((LUNES + timedelta(days=1)).date()))   # día nuevo: de cero
+        self.assertFalse(u.agotado(l))
+
+    def test_uso_guardado_se_recupera(self):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = os.path.join(d, "uso.json")
+            a = uso.AlmacenUso(ruta)
+            a.datos.al_dia(LUNES.date())
+            a.datos.sumar(Limite("app", "discord.exe", 10), 125.04)
+            a.guardar()
+            self.assertEqual(uso.AlmacenUso(ruta).datos, Uso("2026-11-16", {"app:discord.exe": 125.0}))
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write("{roto")
+            self.assertEqual(uso.AlmacenUso(ruta).datos, Uso())
+
+
+class VentanaFalsa:
+    """Imita la ventana en primer plano para el motor."""
+
+    def __init__(self, programa="chrome.exe", titulo="Inicio • Instagram - Google Chrome", hwnd=7):
+        self.actual = procesos.Ventana(hwnd, programa, titulo)
+        self.pestanas = []
+
+    def __call__(self):
+        return self.actual
+
+    def cerrar(self, hwnd):
+        """Como Ctrl+W: queda a la vista otra pestaña."""
+        self.pestanas.append(hwnd)
+        self.actual = procesos.Ventana(hwnd, self.actual.programa, "Nueva pestaña - Google Chrome")
+        return True
+
+
+class TestMotorLimites(unittest.TestCase):
+    def preparar(self, d, limites, ventana):
+        ruta_hosts = os.path.join(d, "hosts")
+        with open(ruta_hosts, "wb") as f:
+            f.write(b"127.0.0.1 localhost\r\n")
+        alm = Almacen(os.path.join(d, "config.json"))
+        alm.cfg.limites = limites
+        motor = Motor(alm, ruta_hosts, ventana_activa=ventana, cerrar_pestana=ventana.cerrar)
+        return motor, ruta_hosts
+
+    def correr(self, motor, desde, segundos):
+        """Un paso por segundo, como la interfaz."""
+        for s in range(segundos + 1):
+            motor.paso(desde + timedelta(seconds=s))
+
+    def test_cuenta_el_sitio_a_la_vista_y_lo_bloquea_al_agotarse(self):
+        with tempfile.TemporaryDirectory() as d:
+            ventana = VentanaFalsa()
+            l = Limite("sitio", "instagram.com", 1)
+            motor, ruta_hosts = self.preparar(d, [l], ventana)
+            inicio = LUNES.replace(hour=10)
+            self.correr(motor, inicio, 30)
+            self.assertEqual(motor.uso.datos.usados(l), 30)
+            self.assertNotIn("instagram", leer(ruta_hosts))
+
+            ventana.actual = procesos.Ventana(7, "chrome.exe", "Gatitos - YouTube - Google Chrome")
+            self.correr(motor, inicio + timedelta(seconds=31), 60)   # otra pestaña: no cuenta
+            self.assertEqual(motor.uso.datos.usados(l), 30)
+
+            ventana.actual = procesos.Ventana(7, "chrome.exe", "Instagram - Google Chrome")
+            self.correr(motor, inicio + timedelta(seconds=100), 31)
+            self.assertEqual(motor.agotados, [l])
+            self.assertIn("0.0.0.0 instagram.com", leer(ruta_hosts))
+            self.assertEqual(ventana.pestanas, [7])                 # cerró la pestaña a la vista
+            # El uso quedó guardado al agotarse.
+            self.assertTrue(uso.AlmacenUso(os.path.join(d, "uso.json")).datos.segundos["sitio:instagram.com"] >= 60)
+
+            # Si vuelves a abrirlo, se cierra otra vez (con una pausa para que el navegador cambie el título).
+            _, cerrada = motor._pestana_cerrada
+            ventana.actual = procesos.Ventana(7, "chrome.exe", "Instagram - Google Chrome")
+            motor.paso(cerrada + timedelta(seconds=1))
+            self.assertEqual(ventana.pestanas, [7])
+            self.assertEqual(motor.pestanas_cerradas, [])
+            motor.paso(cerrada + timedelta(seconds=2))
+            self.assertEqual(ventana.pestanas, [7, 7])
+            self.assertEqual(motor.pestanas_cerradas, ["instagram.com"])
+
+            motor.paso(LUNES + timedelta(days=1, seconds=1))         # día nuevo: se libera
+            self.assertEqual(motor.agotados, [])
+            self.assertNotIn("instagram", leer(ruta_hosts))
+
+    def test_aviso_cuando_quedan_cinco_minutos(self):
+        with tempfile.TemporaryDirectory() as d:
+            ventana = VentanaFalsa(programa="discord.exe", titulo="Discord")
+            l = Limite("app", "discord.exe", 15)
+            motor, _ = self.preparar(d, [l], ventana)
+            motor.uso.datos.al_dia(LUNES.date())
+            motor.uso.datos.sumar(l, 10 * 60 - 1.5)
+            inicio = LUNES.replace(hour=10)
+            motor.paso(inicio)
+            motor.paso(inicio + timedelta(seconds=1))
+            self.assertEqual(motor.por_agotarse, [])
+            motor.paso(inicio + timedelta(seconds=2))
+            self.assertEqual(motor.por_agotarse, [l])
+            motor.paso(inicio + timedelta(seconds=3))
+            self.assertEqual(motor.por_agotarse, [])
+
+    def test_no_cuenta_la_pc_suspendida(self):
+        with tempfile.TemporaryDirectory() as d:
+            ventana = VentanaFalsa(programa="discord.exe", titulo="Discord")
+            l = Limite("app", "discord.exe", 30)
+            motor, _ = self.preparar(d, [l], ventana)
+            inicio = LUNES.replace(hour=10)
+            motor.paso(inicio)
+            motor.paso(inicio + timedelta(hours=2))   # hueco de 2 h: la PC estaba suspendida
+            self.assertEqual(motor.uso.datos.usados(l), 0)
+            self.assertFalse(motor.hay_agotados())
+
+    def test_cierra_la_app_agotada_sin_bloqueo(self):
+        if any(n.lower() == "ping.exe" for _, n in procesos.listar()):
+            self.skipTest("Ya hay un ping.exe abierto; no se toca.")
+        with tempfile.TemporaryDirectory() as d:
+            ventana = VentanaFalsa(programa="explorer.exe", titulo="Escritorio")
+            l = Limite("app", "ping.exe", 1)
+            motor, _ = self.preparar(d, [l], ventana)
+            motor.uso.datos.al_dia(datetime.now().date())
+            ping = subprocess.Popen(["ping", "-n", "60", "127.0.0.1"], stdout=subprocess.DEVNULL,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            try:
+                estado, cerradas = motor.paso()
+                self.assertEqual(cerradas, [])            # todavía le queda tiempo
+                motor.uso.datos.sumar(l, 60)
+                estado, cerradas = motor.paso()
+                self.assertFalse(estado.activo)
+                self.assertIn("ping.exe", [c.lower() for c in cerradas])
+                ping.wait(timeout=5)
+                self.assertTrue(motor.hay_agotados())
+            finally:
+                if ping.poll() is None:
+                    ping.kill()
+
+
+@unittest.skipIf(interfaz is None, "tkinter no está disponible")
+class TestInterfazLimites(unittest.TestCase):
+    def ventana(self, cfg: Config, tipo="sitio", nombre="instagram.com", horas="0", minutos="30", uso_hoy=None):
+        datos = uso_hoy or Uso()
+        v = types.SimpleNamespace(
+            almacen=types.SimpleNamespace(cfg=cfg), _pie=mock.Mock(), _guardar_y_aplicar=mock.Mock(),
+            motor=types.SimpleNamespace(uso=types.SimpleNamespace(datos=datos)),
+            var_tipo_limite=Valor(tipo), cmb_limite=mock.Mock(get=mock.Mock(return_value=nombre)),
+            var_lim_horas=Valor(horas), var_lim_minutos=Valor(minutos),
+            lista_limites=mock.Mock(seleccion=mock.Mock(return_value=[0])))
+        v._no_se_puede_aflojar = types.MethodType(interfaz.App._no_se_puede_aflojar, v)
+        return v
+
+    def test_minutos_corto_y_descripcion(self):
+        self.assertEqual(interfaz.minutos_corto(45), "45 min")
+        self.assertEqual(interfaz.minutos_corto(120), "2 h")
+        self.assertEqual(interfaz.minutos_corto(90), "1 h 30 min")
+        l = Limite("sitio", "instagram.com", 30)
+        u = Uso("2026-11-16", {"sitio:instagram.com": 12.5 * 60})
+        self.assertEqual(interfaz.describir_limite(l, u), "instagram.com  ·  30 min por día  ·  hoy 12 min, quedan 18 min")
+        u.sumar(l, 20 * 60)
+        self.assertEqual(interfaz.describir_limite(l, u), "instagram.com  ·  30 min por día  ·  se acabó por hoy")
+
+    def test_agrega_y_baja_un_limite(self):
+        cfg = Config()
+        v = self.ventana(cfg, nombre="https://www.Instagram.com/explore")
+        interfaz.App._agregar_limite(v)
+        self.assertEqual(cfg.limites, [Limite("sitio", "instagram.com", 30)])
+        v = self.ventana(cfg, nombre="instagram.com", minutos="15")
+        interfaz.App._agregar_limite(v)
+        self.assertEqual(cfg.limites, [Limite("sitio", "instagram.com", 15)])
+        v = self.ventana(cfg, tipo="app", nombre="Discord", horas="1", minutos="0")
+        interfaz.App._agregar_limite(v)
+        self.assertEqual(cfg.limites, [Limite("app", "discord.exe", 60), Limite("sitio", "instagram.com", 15)])
+
+    def test_rechaza_tiempo_no_valido(self):
+        for horas, minutos in [("0", "0"), ("24", "0"), ("1", "60"), ("dos", "0")]:
+            cfg = Config()
+            v = self.ventana(cfg, horas=horas, minutos=minutos)
+            with self.subTest(horas=horas, minutos=minutos), \
+                    mock.patch.object(interfaz.messagebox, "showwarning") as aviso:
+                interfaz.App._agregar_limite(v)
+                aviso.assert_called_once()
+                self.assertEqual(cfg.limites, [])
+
+    def test_no_deja_quitar_ni_subir_un_limite_agotado(self):
+        l = Limite("sitio", "instagram.com", 30)
+        hoy = Uso("2026-11-16", {"sitio:instagram.com": 30 * 60})
+        cfg = Config(limites=[l])
+        v = self.ventana(cfg, minutos="45", uso_hoy=hoy)
+        with mock.patch.object(interfaz.messagebox, "showwarning") as aviso:
+            interfaz.App._agregar_limite(v)
+            interfaz.App._quitar_limites(v)
+        self.assertEqual(aviso.call_count, 2)
+        self.assertIn("mañana", aviso.call_args.args[1])
+        self.assertEqual(cfg.limites, [l])
+        v = self.ventana(cfg, minutos="10", uso_hoy=hoy)      # bajarlo sí se puede
+        interfaz.App._agregar_limite(v)
+        self.assertEqual(cfg.limites, [Limite("sitio", "instagram.com", 10)])
+
+    def test_no_deja_quitar_limites_durante_un_bloqueo(self):
+        cfg = Config(limites=[Limite("app", "discord.exe", 30)],
+                     sesion_fin=(datetime.now() + timedelta(minutes=10)).isoformat(timespec="seconds"))
+        v = self.ventana(cfg)
+        with mock.patch.object(interfaz.messagebox, "showwarning") as aviso:
+            interfaz.App._quitar_limites(v)
+        aviso.assert_called_once()
+        self.assertEqual(len(cfg.limites), 1)
+        cfg.sesion_fin = None
+        interfaz.App._quitar_limites(v)
+        self.assertEqual(cfg.limites, [])
+
+    def test_confirma_si_el_limite_nuevo_ya_esta_agotado(self):
+        cfg = Config()
+        hoy = Uso("2026-11-16", {"sitio:instagram.com": 40 * 60})   # tenía un límite y lo quitó
+        v = self.ventana(cfg, minutos="30", uso_hoy=hoy)
+        with mock.patch.object(interfaz.messagebox, "askyesno", return_value=False) as pregunta:
+            interfaz.App._agregar_limite(v)
+        pregunta.assert_called_once()
+        self.assertEqual(cfg.limites, [])
 
 
 if __name__ == "__main__":

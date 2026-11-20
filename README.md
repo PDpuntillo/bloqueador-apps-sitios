@@ -28,15 +28,32 @@ Cada dispositivo tiene sus propias listas (no se sincronizan).
 | **Sitios web** | Escribe una dirección (`youtube.com`) o usa los botones de *Agregar rápido*. |
 | **Aplicaciones** | Despliega la lista de programas abiertos, escribe el nombre (`discord.exe`) o usa *Examinar…*. |
 | **Horarios** | Elige días y horas. Si la hora final es menor que la inicial, termina al día siguiente (22:00 → 07:00). Si las dos horas son iguales, dura 24 h (`00:00 → 00:00` bloquea el día completo). Los horarios tienen que dejar al menos un rato libre en la semana: el programa rechaza los que harían que el bloqueo no terminara nunca. Si un horario termina justo cuando empieza otro, el fin que se muestra es el del último de la cadena. |
+| **Límites diarios** | Un máximo de uso por día para cada sitio o programa (por ejemplo, `instagram.com`, 30 minutos). La lista muestra cuánto usaste hoy y cuánto te queda. Ver *Límites diarios* más abajo. |
 | **Ajustes** | Inicio automático con Windows, cómo funciona y *Salir del Bloqueador*. |
 
-Arriba de las pestañas está el recuadro **Sesión de concentración**: bloquea todo durante X
-minutos, a partir de ahora.
+Arriba de las pestañas está el recuadro **Sesión de concentración**: bloquea todo durante las
+horas y minutos que elijas (de 1 minuto a 24 horas), a partir de ahora.
 
 **Durante un bloqueo** puedes agregar sitios, apps u horarios, pero **no** puedes quitarlos,
 detener la sesión, desactivar el inicio automático ni cerrar el programa (la X solo lo minimiza).
 Única excepción: si una configuración de una versión anterior tiene horarios que cubren toda la
 semana (un bloqueo "sin fin"), sí puedes quitar horarios para que el bloqueo pueda terminar.
+
+### Límites diarios
+
+- Cuenta el tiempo que el programa o el sitio está **en primer plano** (la ventana activa). El
+  contador vuelve a cero cada día a las 00:00 y no cuenta mientras la PC está suspendida.
+- Los navegadores no dicen qué dirección muestran, así que un sitio se reconoce por el **título
+  de la pestaña activa**, que casi siempre lleva el nombre del sitio (`Inicio • Instagram`,
+  `Video - YouTube`, `Inicio / X`). Una página cuyo título no lo menciona no cuenta, y una
+  página de otro sitio que lo menciona sí.
+- Cuando quedan 5 minutos aparece un aviso. Al acabarse el tiempo, el programa se cierra y el
+  sitio se bloquea en el archivo hosts **hasta las 00:00**. Si su pestaña está a la vista, se
+  cierra (el Bloqueador pulsa Ctrl+W).
+- Agregar un límite o bajarlo se puede siempre. **Quitarlo o aumentarlo, no** durante un bloqueo
+  ni si hoy ya se acabó su tiempo. Mientras haya un límite agotado, el programa tampoco se puede
+  cerrar (la X lo minimiza).
+- El tiempo de hoy se guarda en `C:\ProgramData\Bloqueador\uso.json`.
 
 ### Cómo funciona
 
@@ -91,9 +108,10 @@ estas variables de entorno: `BLOQUEADOR_SIN_ADMIN=1`, `BLOQUEADOR_HOSTS=<ruta a 
 windows/
   bloqueador.pyw        punto de entrada: pide permisos y abre la ventana
   nucleo/
-    config.py           listas, horarios, sesión y guardado en JSON
+    config.py           listas, horarios, límites, sesión y guardado en JSON
     hosts.py            bloqueo de sitios con el archivo hosts
-    procesos.py         listar y cerrar programas (ctypes, sin librerías externas)
+    procesos.py         programas abiertos, ventana activa y cierre (ctypes, sin librerías externas)
+    uso.py              tiempo de uso de hoy de lo que tiene límite diario
     motor.py            cada segundo decide si hay bloqueo y lo aplica
     autoinicio.py       tarea del Programador de tareas para abrir al iniciar sesión
     interfaz.py         la ventana (tkinter)
@@ -152,9 +170,10 @@ Al abrirla, la pestaña **Inicio** muestra qué falta activar:
 
 | Pestaña | Qué haces |
 |---|---|
-| **Inicio** | Ves si hay un bloqueo y hasta cuándo, empiezas una **sesión de concentración** y revisas qué falta activar. |
+| **Inicio** | Ves si hay un bloqueo y hasta cuándo, empiezas una **sesión de concentración** (con los botones rápidos o escribiendo horas y minutos, hasta 24 horas) y revisas qué falta activar. |
 | **Apps** | Marcas las apps instaladas que quieres bloquear. El teléfono, los ajustes y el propio Bloqueador no se pueden bloquear. |
 | **Sitios** | Escribes una dirección (`youtube.com`) o usas *Agregar rápido*, que también agrega los dominios de videos e imágenes de cada servicio y ofrece bloquear su app. |
+| **Límites** | Un máximo de uso por día para cada app o sitio (por ejemplo, Instagram, 30 minutos). Cada límite muestra cuánto usaste hoy. Tocar uno lo carga en el formulario para cambiarlo. |
 | **Horarios** | Igual que en Windows: si la hora final es menor, termina al día siguiente, y si las dos son iguales, dura 24 h. No se aceptan horarios que cubran la semana entera. Si un horario empieza justo cuando termina otro (o una sesión), el bloqueo sigue sin pausa y la app muestra el fin real. |
 | **Ajustes** | Modo estricto, Protección contra desinstalación y cómo funciona cada cosa (también *"Qué no cubre"*). |
 
@@ -162,7 +181,8 @@ Al abrirla, la pestaña **Inicio** muestra qué falta activar:
 
 - **Apps:** un *servicio de accesibilidad* detecta qué app pasa a primer plano y, si está
   bloqueada, la tapa con la pantalla de bloqueo. También cierra las ventanas de imagen en imagen
-  (PiP) de esas apps. Solo mira el nombre de cada app: no lee lo que hay en pantalla.
+  (PiP) de esas apps. Solo mira el nombre de cada app: no lee lo que hay en pantalla (salvo la
+  barra de direcciones del navegador si pusiste límite a algún sitio; ver *Límites diarios*).
 - **Sitios web:** una *VPN local* (`VpnService`) que solo recibe las consultas DNS. Si el sitio
   está en la lista y hay un bloqueo, responde "no existe"; si no, la reenvía al DNS de tu red.
   El resto del tráfico no pasa por la VPN, y nada se envía a servidores del Bloqueador. Si la red
@@ -172,6 +192,15 @@ Al abrirla, la pestaña **Inicio** muestra qué falta activar:
 - **Durante un bloqueo** puedes agregar sitios, apps y horarios, o extender la sesión, pero no
   quitar nada, detener el bloqueo, apagar el modo estricto ni quitar la Protección contra
   desinstalación.
+- **Límites diarios:** el servicio de accesibilidad cuenta el tiempo que cada app con límite
+  está en pantalla (no cuenta con la pantalla apagada). Para los sitios lee la **barra de
+  direcciones** de los navegadores conocidos (Chrome, Samsung Internet, Firefox, Edge, Brave,
+  Opera, Vivaldi, DuckDuckGo y algunos más), solo si hay algún sitio con límite, y no guarda la
+  dirección. Cuando quedan 5 minutos aparece un aviso; al acabarse, la app o el sitio se tapa
+  con la pantalla de bloqueo hasta las 00:00. El filtro de sitios también deja de resolverlo.
+  Si un sitio se acaba, la pantalla de bloqueo ofrece *Abrir otra página* en el mismo
+  navegador. Agregar o bajar un límite se puede siempre; quitarlo o aumentarlo, no durante un
+  bloqueo ni si hoy ya se acabó su tiempo.
 
 ### Protección contra desinstalación
 
@@ -311,9 +340,9 @@ Queda por probar en otros teléfonos, sobre todo Xiaomi, Huawei y Oppo, y en And
 ```
 android/app/src/main/java/com/bloqueador/android/
   dominio/     reglas: configuración, horarios, estado del bloqueo, dominios y paquetes
-  datos/       guardado de la configuración
+  datos/       guardado de la configuración y del tiempo de uso de hoy
   bloqueo/     servicio de accesibilidad, VPN (filtro DNS), pantalla de bloqueo, arranque,
                protección contra desinstalación
-  ui/          pantallas (Inicio, Apps, Sitios, Horarios, Ajustes)
+  ui/          pantallas (Inicio, Apps, Sitios, Límites, Horarios, Ajustes)
 android/app/src/test/...      pruebas de las reglas y del análisis DNS
 ```

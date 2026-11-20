@@ -7,6 +7,7 @@ import android.graphics.drawable.ColorDrawable
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
@@ -34,6 +35,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,17 +52,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import com.bloqueador.android.datos.Almacen
+import com.bloqueador.android.datos.AlmacenUso
+import com.bloqueador.android.dominio.Limite
 import com.bloqueador.android.dominio.Paquetes
+import com.bloqueador.android.dominio.TipoLimite
 import com.bloqueador.android.dominio.cuando
 import com.bloqueador.android.dominio.duracion
+import com.bloqueador.android.dominio.etiquetaMinutos
 import com.bloqueador.android.ui.ColoresEstado
 import com.bloqueador.android.ui.TemaBloqueador
 import kotlinx.coroutines.delay
 import java.time.LocalDateTime
 
 /**
- * Pantalla que tapa una app bloqueada. La abre [ServicioAccesibilidad] directamente encima de
- * la app, sin pulsar inicio antes.
+ * Pantalla que tapa una app bloqueada, o una app o un sitio cuyo tiempo de hoy se acabó. La abre
+ * [ServicioAccesibilidad] directamente encima de la app, sin pulsar inicio antes.
  *
  * En el manifiesto es singleTask + noHistory y va en su propia tarea: si ya está abierta y
  * se bloquea otra app, llega por [onNewIntent] y solo se actualizan los datos.
@@ -70,6 +76,9 @@ class PantallaBloqueoActivity : ComponentActivity() {
     // Estado de Compose: al cambiar (onNewIntent) la pantalla se redibuja sola.
     private var nombre by mutableStateOf("")
     private var paquete by mutableStateOf("")
+
+    // Si tapa algo cuyo tiempo de hoy se acabó: su límite. Con un sitio, [paquete] es el navegador.
+    private var limite by mutableStateOf<Limite?>(null)
 
     // App por la que ya se pausó el audio mientras esta pantalla está abierta.
     private var audioPausadoPara: String? = null
@@ -85,13 +94,19 @@ class PantallaBloqueoActivity : ComponentActivity() {
         // Atrás hace lo mismo que el botón.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                salir(Almacen.config.estado().activo)
+                salir(vigente())
             }
         })
 
         setContent {
             TemaBloqueador {
-                PantallaBloqueo(nombre = nombre, paquete = paquete, alPulsar = { activo -> salir(activo) })
+                PantallaBloqueo(
+                    nombre = nombre,
+                    paquete = paquete,
+                    limite = limite,
+                    alPulsar = { activo -> salir(activo) },
+                    alAbrirOtraPagina = { abrirOtraPagina() },
+                )
             }
         }
     }
@@ -123,6 +138,34 @@ class PantallaBloqueoActivity : ComponentActivity() {
     private fun leer(intent: Intent?) {
         paquete = intent?.getStringExtra(EXTRA_PAQUETE).orEmpty()
         nombre = intent?.getStringExtra(EXTRA_NOMBRE)?.trim()?.takeIf { it.isNotEmpty() } ?: paquete
+        val tipo = TipoLimite.entries.firstOrNull { it.clave == intent?.getStringExtra(EXTRA_LIMITE_TIPO) }
+        val nombreLimite = intent?.getStringExtra(EXTRA_LIMITE_NOMBRE).orEmpty()
+        val minutos = intent?.getIntExtra(EXTRA_LIMITE_MINUTOS, 0) ?: 0
+        limite = if (tipo != null && nombreLimite.isNotEmpty() && minutos > 0) Limite(tipo, nombreLimite, minutos) else null
+    }
+
+    /** True si lo que tapa sigue bloqueado: su tiempo de hoy sigue agotado, o sigue el bloqueo. */
+    private fun vigente(): Boolean {
+        val l = limite
+        return if (l != null) AlmacenUso.hoy().agotado(l) else Almacen.config.estado().activo
+    }
+
+    /**
+     * Con un sitio sin tiempo: abre una pestaña nueva en el mismo navegador, para que puedas
+     * seguir usándolo con otras páginas. La del sitio queda atrás y se vuelve a tapar si vuelves.
+     */
+    private fun abrirOtraPagina() {
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(PAGINA_NUEVA))
+                    .setPackage(paquete)
+                    .addCategory(Intent.CATEGORY_BROWSABLE)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            finish()
+        } catch (e: Exception) {
+            salir(true)
+        }
     }
 
     /** Avisa al servicio de que la pantalla se ve y pausa lo que suene de la app bloqueada. */
@@ -132,7 +175,7 @@ class PantallaBloqueoActivity : ComponentActivity() {
         // Una sola vez por app mientras la pantalla está abierta: si se pausa y se reanuda (por
         // ejemplo, al llegar un onNewIntent), no vuelve a cortar lo que pongas en una app permitida.
         // Solo con las apps de tu lista (no con Ajustes ni las tiendas del modo estricto).
-        if (paquete != audioPausadoPara && paquete in Almacen.config.apps) {
+        if (paquete != audioPausadoPara && (paquete in Almacen.config.apps || limite != null)) {
             audioPausadoPara = paquete
             pausarAudio()
         }
@@ -194,22 +237,37 @@ class PantallaBloqueoActivity : ComponentActivity() {
     companion object {
         const val EXTRA_NOMBRE = "com.bloqueador.android.extra.NOMBRE"
         const val EXTRA_PAQUETE = "com.bloqueador.android.extra.PAQUETE"
+        private const val EXTRA_LIMITE_TIPO = "com.bloqueador.android.extra.LIMITE_TIPO"
+        private const val EXTRA_LIMITE_NOMBRE = "com.bloqueador.android.extra.LIMITE_NOMBRE"
+        private const val EXTRA_LIMITE_MINUTOS = "com.bloqueador.android.extra.LIMITE_MINUTOS"
         private const val CLAVE_AUDIO_PAUSADO = "audio_pausado_para"
+
+        /** Lo que abre «Abrir otra página» en el navegador de un sitio sin tiempo. */
+        private const val PAGINA_NUEVA = "https://www.google.com/"
 
         /**
          * Intent para abrir esta pantalla desde un servicio. FLAG_ACTIVITY_NO_USER_ACTION evita
          * que la app tapada lo tome como "el usuario se va" y pase sola a PiP.
          */
-        fun crearIntent(context: Context, nombre: String, paquete: String): Intent =
+        fun crearIntent(context: Context, nombre: String, paquete: String, limite: Limite? = null): Intent =
             Intent(context, PantallaBloqueoActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
                 .putExtra(EXTRA_NOMBRE, nombre)
                 .putExtra(EXTRA_PAQUETE, paquete)
+                .putExtra(EXTRA_LIMITE_TIPO, limite?.tipo?.clave)
+                .putExtra(EXTRA_LIMITE_NOMBRE, limite?.nombre)
+                .putExtra(EXTRA_LIMITE_MINUTOS, limite?.minutos ?: 0)
     }
 }
 
 @Composable
-private fun PantallaBloqueo(nombre: String, paquete: String, alPulsar: (activo: Boolean) -> Unit) {
+private fun PantallaBloqueo(
+    nombre: String,
+    paquete: String,
+    limite: Limite?,
+    alPulsar: (activo: Boolean) -> Unit,
+    alAbrirOtraPagina: () -> Unit,
+) {
     var ahora by remember { mutableStateOf(LocalDateTime.now()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -222,9 +280,14 @@ private fun PantallaBloqueo(nombre: String, paquete: String, alPulsar: (activo: 
     // Se lee en cada segundo: si la sesión se extiende, la pantalla lo muestra al instante.
     val config = Almacen.config
     val estado = config.estado(ahora)
-    val activo = estado.activo
+    // Con un límite, lo bloqueado se libera a las 00:00 (con el uso del día nuevo).
+    val activo = if (limite != null) AlmacenUso.hoy().agotado(limite) else estado.activo
     // Sin hora de fin si los horarios cubren toda la semana (estado.permanente).
-    val hasta = estado.hasta?.takeIf { activo }
+    val hasta = if (limite != null) {
+        ahora.toLocalDate().plusDays(1).atStartOfDay().takeIf { activo }
+    } else {
+        estado.hasta?.takeIf { activo }
+    }
 
     val oscuro = isSystemInDarkTheme()
     val fondo = when {
@@ -243,6 +306,8 @@ private fun PantallaBloqueo(nombre: String, paquete: String, alPulsar: (activo: 
 
     // Lo que no está en tu lista se bloquea por el modo estricto.
     val titulo = when {
+        limite != null && !activo -> "Ya puedes volver a usar $nombre"
+        limite != null -> "Se acabó el tiempo de hoy de $nombre"
         !activo -> "El bloqueo terminó"
         paquete.isEmpty() || paquete in config.apps -> "${nombre.ifEmpty { "Esta app" }} está bloqueada"
         paquete == Paquetes.DIALOGO_VPN -> "Los ajustes de VPN están bloqueados mientras dure el bloqueo (modo estricto)"
@@ -281,10 +346,20 @@ private fun PantallaBloqueo(nombre: String, paquete: String, alPulsar: (activo: 
                 fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center,
             )
+            if (limite != null && activo) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Usaste los ${etiquetaMinutos(limite.minutos)} que tienes por día.",
+                    color = texto,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center,
+                )
+            }
             if (hasta != null) {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "El bloqueo termina ${cuando(hasta, ahora)}",
+                    text = if (limite != null) "Vuelve a estar disponible ${cuando(hasta, ahora)}"
+                    else "El bloqueo termina ${cuando(hasta, ahora)}",
                     color = texto,
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center,
@@ -307,11 +382,25 @@ private fun PantallaBloqueo(nombre: String, paquete: String, alPulsar: (activo: 
                 )
             }
             Spacer(Modifier.height(32.dp))
-            Button(
-                onClick = { alPulsar(activo) },
-                colors = ButtonDefaults.buttonColors(containerColor = acento, contentColor = fondo),
-            ) {
-                Text(if (activo) "Volver al inicio" else "Cerrar")
+            if (activo && limite?.tipo == TipoLimite.SITIO) {
+                // El navegador sigue disponible para otras páginas.
+                Button(
+                    onClick = alAbrirOtraPagina,
+                    colors = ButtonDefaults.buttonColors(containerColor = acento, contentColor = fondo),
+                ) {
+                    Text("Abrir otra página")
+                }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = { alPulsar(true) }) {
+                    Text("Volver al inicio", color = acento)
+                }
+            } else {
+                Button(
+                    onClick = { alPulsar(activo) },
+                    colors = ButtonDefaults.buttonColors(containerColor = acento, contentColor = fondo),
+                ) {
+                    Text(if (activo) "Volver al inicio" else "Cerrar")
+                }
             }
         }
     }

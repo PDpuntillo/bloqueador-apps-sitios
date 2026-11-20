@@ -20,9 +20,15 @@ import android.telecom.TelecomManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import android.widget.Toast
 import com.bloqueador.android.datos.Almacen
+import com.bloqueador.android.datos.AlmacenUso
 import com.bloqueador.android.dominio.Config
+import com.bloqueador.android.dominio.Dominios
+import com.bloqueador.android.dominio.Limite
 import com.bloqueador.android.dominio.Paquetes
+import com.bloqueador.android.dominio.TipoLimite
+import com.bloqueador.android.dominio.limitesEnUso
 
 /**
  * Detecta qué app pasa a primer plano y, si está bloqueada, la tapa con [PantallaBloqueoActivity].
@@ -31,8 +37,13 @@ import com.bloqueador.android.dominio.Paquetes
  * la vuelve a abrir en cada revisión, así que una app bloqueada en la otra mitad de la pantalla
  * dividida o en una ventana flotante sigue a la vista.
  *
- * Solo usa el nombre de paquete y la clase de cada ventana: no lee ni guarda el contenido de la
- * pantalla. Todo corre en el hilo principal (eventos y revisión periódica).
+ * También cuenta el tiempo de uso de las apps y los sitios con límite diario y, cuando se acaba,
+ * los tapa hasta las 00:00, haya o no un bloqueo.
+ *
+ * Solo usa el nombre de paquete y la clase de cada ventana. La única excepción: si pusiste
+ * límite a algún sitio, lee la barra de direcciones del navegador que está a la vista (solo esa
+ * vista) para saber qué sitio es; la dirección no se guarda. Todo corre en el hilo principal
+ * (eventos y revisión periódica).
  */
 class ServicioAccesibilidad : AccessibilityService() {
 
@@ -73,6 +84,9 @@ class ServicioAccesibilidad : AccessibilityService() {
     // True mientras hay una revisión de ventanas programada (agrupa los eventos seguidos).
     private var ventanasPendientes = false
 
+    // Última vez que se contó el tiempo de uso (SystemClock.elapsedRealtime), o 0.
+    private var ultimoConteo = 0L
+
     /** Revisión periódica mientras el servicio está conectado. */
     private val revision = object : Runnable {
         override fun run() {
@@ -94,9 +108,26 @@ class ServicioAccesibilidad : AccessibilityService() {
         ventanasPendientes = false
         try {
             val config = Almacen.config
-            if (conectado && config.estado().activo) revisarVentanas(config)
+            val activo = config.estado().activo
+            if (conectado && (activo || AlmacenUso.agotados(config).any { it.tipo == TipoLimite.APP })) {
+                revisarVentanas(config, activo)
+            }
         } catch (e: Exception) {
             // Se vuelve a intentar en la próxima revisión.
+        }
+    }
+
+    /** Al abrir un navegador: si muestra un sitio sin tiempo, lo tapa sin esperar a la revisión. */
+    private val revisionSitio = Runnable {
+        try {
+            val config = Almacen.config
+            val vista = if (conectado) primerPlano(config) else null
+            val sitio = vista?.sitio
+            if (vista != null && sitio != null) {
+                AlmacenUso.sitioAgotado(sitio, config)?.let { bloquearSitio(vista.paquete, it) }
+            }
+        } catch (e: Exception) {
+            // Lo ve la próxima revisión.
         }
     }
 
@@ -166,7 +197,7 @@ class ServicioAccesibilidad : AccessibilityService() {
     private fun alCambiarVentana(paquete: String, clase: String?, ventana: Int) {
         val config = Almacen.config
         val actividad = clase?.takeIf { it.isNotEmpty() }
-        if (paquete in config.apps) {
+        if (paquete in config.apps || AlmacenUso.appAgotada(paquete, config) != null) {
             // Las superposiciones y burbujas de una app bloqueada no son actividades: no se tocan,
             // para no sacarte de lo que estás usando. Si las usas, revisar() las ve como ventana activa.
             if (actividad != null && !esActividad(paquete, actividad)) return
@@ -175,6 +206,10 @@ class ServicioAccesibilidad : AccessibilityService() {
             ultimaActividad[paquete] = actividad
         }
         evaluar(paquete, config, ventana, porEvento = true)
+        if (paquete in Paquetes.BARRAS_DE_DIRECCION && AlmacenUso.sitiosAgotados(config).isNotEmpty()) {
+            handler.removeCallbacks(revisionSitio)
+            handler.postDelayed(revisionSitio, ESPERA_SITIO_MS)
+        }
     }
 
     /**
@@ -185,16 +220,43 @@ class ServicioAccesibilidad : AccessibilityService() {
     private fun evaluar(paquete: String, config: Config, ventana: Int = SIN_VENTANA, porEvento: Boolean = false) {
         if (paquete.isEmpty()) return
         // Primero lo más barato; los launchers, el teclado y las ventanas solo se consultan si hace falta.
-        if (!estaEnLista(paquete, config)) return
-        if (!config.estado().activo) return
+        val agotada = AlmacenUso.appAgotada(paquete, config)
+        val activo: Boolean
+        if (agotada == null) {
+            if (!estaEnLista(paquete, config)) return
+            if (!config.estado().activo) return
+            activo = true
+        } else {
+            activo = config.estado().activo
+        }
         if (ignorado(paquete)) return
         // Lo que solo bloquea el modo estricto se tapa si es una pantalla normal (una actividad o
         // un diálogo), no si es una superposición: la barra lateral de juegos de Xiaomi o el menú
         // de asistencia de Samsung viven en paquetes de Ajustes y no sirven para desactivar nada.
         // No se usa esActividad(): desde Android 11 da false para los paquetes que la app no ve,
         // como el diálogo de VPN, y dejarían de bloquearse.
-        if (paquete !in config.apps && esSuperposicion(ventana)) return
-        bloquear(paquete, porEvento)
+        if (paquete !in config.apps && agotada == null && esSuperposicion(ventana)) return
+        bloquear(paquete, porEvento, limiteAgotado(paquete, config, activo))
+    }
+
+    /**
+     * El límite de [paquete] si se bloquea solo porque se acabó su tiempo de hoy. Si además lo
+     * bloquea un bloqueo activo, null: la pantalla muestra el bloqueo.
+     */
+    private fun limiteAgotado(paquete: String, config: Config, activo: Boolean): Limite? {
+        val limite = AlmacenUso.appAgotada(paquete, config) ?: return null
+        return if (activo && estaEnLista(paquete, config)) null else limite
+    }
+
+    /** Tapa el navegador [navegador], que muestra un sitio cuyo tiempo de hoy ([limite]) se acabó. */
+    private fun bloquearSitio(navegador: String, limite: Limite) {
+        if (!ignorado(navegador)) bloquear(navegador, porEvento = false, limite = limite)
+    }
+
+    /** Pantalla de bloqueo para [paquete]; con [limite], explica que se acabó su tiempo de hoy. */
+    private fun intentBloqueo(paquete: String, limite: Limite?): Intent {
+        val nombre = if (limite?.tipo == TipoLimite.SITIO) limite.nombre else nombreVisible(paquete)
+        return PantallaBloqueoActivity.crearIntent(this, nombre, paquete, limite)
     }
 
     /** True si [paquete] se bloquea durante un bloqueo activo. */
@@ -231,7 +293,7 @@ class ServicioAccesibilidad : AccessibilityService() {
      * Tapa [paquete] con la pantalla de bloqueo. [porEvento] es true si la app acaba de pasar a
      * primer plano, y false si la encontró una revisión.
      */
-    private fun bloquear(paquete: String, porEvento: Boolean = false) {
+    private fun bloquear(paquete: String, porEvento: Boolean = false, limite: Limite? = null) {
         // Con una app fijada (Fijar app), Android no deja salir de ella ni abrir otra pantalla, y
         // reintentarlo cada pocos segundos solo repetiría el aviso del sistema.
         if (pantallaFijada()) return
@@ -245,7 +307,7 @@ class ServicioAccesibilidad : AccessibilityService() {
             if (porEvento && ahora - ultimoBloqueoEn >= ANTI_RAFAGA_MS) {
                 ultimoPaquete = paquete
                 ultimoBloqueoEn = ahora
-                abrir(PantallaBloqueoActivity.crearIntent(this, nombreVisible(paquete), paquete))
+                abrir(intentBloqueo(paquete, limite))
             }
             return
         }
@@ -255,7 +317,7 @@ class ServicioAccesibilidad : AccessibilityService() {
 
         // Se abre directamente encima de la app, sin pulsar inicio antes: el botón de inicio hace
         // que las apps de video pasen a PiP y, hasta Android 11, retrasa unos 5 s la pantalla nueva.
-        val abierta = abrir(PantallaBloqueoActivity.crearIntent(this, nombreVisible(paquete), paquete))
+        val abierta = abrir(intentBloqueo(paquete, limite))
         pantallaAbiertaEn = ahora
         handler.removeCallbacks(comprobacionPantalla)
         handler.postDelayed(comprobacionPantalla, if (abierta) ESPERA_PANTALLA_MS else 0L)
@@ -325,22 +387,44 @@ class ServicioAccesibilidad : AccessibilityService() {
      */
     private fun revisar() {
         val config = Almacen.config
-        if (!config.estado().activo) {
+        val activo = config.estado().activo
+        if (config.limites.isEmpty()) {
+            ultimoConteo = 0L
+            if (!activo) {
+                intentosPip.clear()
+                return
+            }
+        }
+        val vista = try {
+            primerPlano(config)
+        } catch (e: Exception) {
+            null
+        }
+        try {
+            contarUso(config, vista)
+        } catch (e: Exception) {
+            // Se pierde este rato: la próxima revisión sigue contando.
+        }
+        val agotados = AlmacenUso.agotados(config)
+        if (!activo && agotados.isEmpty()) {
             intentosPip.clear()
             return
         }
         try {
-            ventanaActiva()?.let { (paquete, id) -> evaluar(paquete, config, id) }
+            if (vista != null) {
+                evaluar(vista.paquete, config, vista.ventana)
+                vista.sitio?.let { s -> AlmacenUso.sitioAgotado(s, config)?.let { bloquearSitio(vista.paquete, it) } }
+            }
         } catch (e: Exception) {
             // Se vuelve a intentar en la próxima revisión.
         }
         try {
-            revisarVentanas(config)
+            revisarVentanas(config, activo)
         } catch (e: Exception) {
             // Ídem.
         }
         try {
-            if (config.sitios.isNotEmpty() && !Servicios.vpnActiva) {
+            if (activo && config.sitios.isNotEmpty() && !Servicios.vpnActiva) {
                 // Si otra VPN la desplazó para saltarse el bloqueo, la recupera.
                 Servicios.recuperarVpnDuranteBloqueo(this)
             }
@@ -349,14 +433,68 @@ class ServicioAccesibilidad : AccessibilityService() {
         }
     }
 
-    /** Paquete e id de la ventana activa. Solo lee el nodo raíz, sin recorrer el árbol de vistas. */
-    private fun ventanaActiva(): Pair<String, Int>? {
+    /** La app en primer plano, el id de su ventana y, si es un navegador, el sitio que muestra. */
+    private class Vista(val paquete: String, val ventana: Int, val sitio: String?)
+
+    /**
+     * Paquete e id de la ventana activa: solo lee el nodo raíz, sin recorrer el árbol de vistas.
+     * Si es un navegador conocido y hay límites de sitios, también lee su barra de direcciones.
+     */
+    private fun primerPlano(config: Config): Vista? {
         val raiz = rootInActiveWindow ?: return null
         return try {
             val paquete = raiz.packageName?.toString()
-            if (paquete.isNullOrEmpty()) null else Pair(paquete, raiz.windowId)
+            if (paquete.isNullOrEmpty()) {
+                null
+            } else {
+                val conSitios = config.limites.any { it.tipo == TipoLimite.SITIO }
+                Vista(paquete, raiz.windowId, if (conSitios) leerSitio(raiz, paquete) else null)
+            }
         } finally {
             reciclar(raiz)
+        }
+    }
+
+    /** El sitio que muestra la barra de direcciones de [paquete] ("instagram.com"), o null. */
+    private fun leerSitio(raiz: AccessibilityNodeInfo, paquete: String): String? {
+        val ids = Paquetes.BARRAS_DE_DIRECCION[paquete] ?: return null
+        for (id in ids) {
+            val nodos = try {
+                raiz.findAccessibilityNodeInfosByViewId("$paquete:id/$id")
+            } catch (e: Exception) {
+                null
+            } ?: continue
+            try {
+                for (nodo in nodos) {
+                    val texto = nodo.text?.toString() ?: continue
+                    Dominios.normalizar(texto)?.let { return it }
+                }
+            } finally {
+                nodos.forEach { reciclar(it) }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Suma el rato desde la revisión anterior a la app (y al sitio) que está a la vista, si tienen
+     * límite. No cuenta con la pantalla apagada ni si pasó mucho (el teléfono estuvo dormido).
+     */
+    private fun contarUso(config: Config, vista: Vista?) {
+        val ahora = SystemClock.elapsedRealtime()
+        val paso = if (ultimoConteo == 0L) 0L else ahora - ultimoConteo
+        ultimoConteo = ahora
+        if (vista == null || paso <= 0L || paso > MAX_PASO_MS || vista.paquete == packageName) return
+        val enUso = limitesEnUso(config, vista.paquete, vista.sitio)
+        if (enUso.isEmpty() || !pantallaEnUso()) return
+        val cambio = AlmacenUso.sumar(enUso, paso)
+        for (l in cambio.porAgotarse) {
+            val nombre = if (l.tipo == TipoLimite.SITIO) l.nombre else nombreVisible(l.nombre)
+            try {
+                Toast.makeText(this, "Te quedan 5 minutos de $nombre por hoy", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                // Solo es un aviso.
+            }
         }
     }
 
@@ -371,7 +509,7 @@ class ServicioAccesibilidad : AccessibilityService() {
      * pantalla dividida, una ventana flotante o una PiP. Las PiP de las apps de tu lista se
      * cierran; si hay otra ventana bloqueada, se abre la pantalla de bloqueo (salvo que ya se vea).
      */
-    private fun revisarVentanas(config: Config) {
+    private fun revisarVentanas(config: Config, activo: Boolean) {
         val vistas = HashSet<Int>()
         var bloqueada: String? = null
         var oculta: Int? = null
@@ -379,7 +517,7 @@ class ServicioAccesibilidad : AccessibilityService() {
             try {
                 if (ventana.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
                 vistas += ventana.id
-                val paquete = revisarVentana(ventana, config)
+                val paquete = revisarVentana(ventana, config, activo)
                 if (bloqueada == null) bloqueada = paquete
                 if (oculta == null && ventana.isActive && ventanaOculta(ventana)) oculta = ventana.id
             } finally {
@@ -388,8 +526,8 @@ class ServicioAccesibilidad : AccessibilityService() {
         }
         intentosPip.keys.retainAll(vistas)
         if (bloqueada != null) {
-            bloquear(bloqueada)
-        } else if (oculta != null) {
+            bloquear(bloqueada, limite = limiteAgotado(bloqueada, config, activo))
+        } else if (oculta != null && activo) {
             revisarOculta(oculta, config)
         }
     }
@@ -445,17 +583,18 @@ class ServicioAccesibilidad : AccessibilityService() {
     }
 
     /** Cierra la PiP de una app de tu lista. Si la ventana es de una app bloqueada, devuelve su paquete. */
-    private fun revisarVentana(ventana: AccessibilityWindowInfo, config: Config): String? {
+    private fun revisarVentana(ventana: AccessibilityWindowInfo, config: Config, activo: Boolean): String? {
         val raiz = ventana.root ?: return null
         return try {
             val paquete = raiz.packageName?.toString()
             if (paquete.isNullOrEmpty()) return null
+            val agotada = AlmacenUso.appAgotada(paquete, config) != null
             if (ventana.isInPictureInPictureMode) {
                 // Solo las de tu lista: la PiP de una videollamada o de un mapa se respeta.
-                if (paquete in config.apps && !ignorado(paquete)) cerrarPip(ventana.id, raiz)
+                if (((activo && paquete in config.apps) || agotada) && !ignorado(paquete)) cerrarPip(ventana.id, raiz)
                 return null
             }
-            paquete.takeIf { estaEnLista(it, config) && !ignorado(it) }
+            paquete.takeIf { ((activo && estaEnLista(it, config)) || agotada) && !ignorado(it) }
         } finally {
             reciclar(raiz)
         }
@@ -662,5 +801,7 @@ class ServicioAccesibilidad : AccessibilityService() {
         const val ESPERA_TRAS_INICIO_MS = 5_500L // hasta Android 11: retraso de las apps tras pulsar inicio
         const val SIN_VENTANA = -1               // id de ventana desconocido
         const val VENTANA_USO_MS = 10 * 60_000L  // estadísticas de uso que se miran (ventanas ocultas)
+        const val MAX_PASO_MS = 10_000L          // un rato más largo entre revisiones no cuenta como uso
+        const val ESPERA_SITIO_MS = 500L         // al abrir un navegador, cuándo se mira qué sitio muestra
     }
 }

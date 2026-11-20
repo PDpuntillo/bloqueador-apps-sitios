@@ -6,6 +6,7 @@ import ntpath
 import os
 import sys
 from ctypes import wintypes
+from dataclasses import dataclass
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -45,6 +46,23 @@ _k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, win
 _k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
 _k32.CloseHandle.argtypes = [wintypes.HANDLE]
 _k32.CloseHandle.restype = wintypes.BOOL
+
+_u32 = ctypes.WinDLL("user32", use_last_error=True)
+_u32.GetForegroundWindow.argtypes = []
+_u32.GetForegroundWindow.restype = wintypes.HWND
+_u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+_u32.GetWindowTextLengthW.restype = ctypes.c_int
+_u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_u32.GetWindowTextW.restype = ctypes.c_int
+_u32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+_u32.GetAsyncKeyState.restype = ctypes.c_short
+_u32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
+_u32.keybd_event.restype = None
+
+_VK_CONTROL, _VK_SHIFT, _VK_MENU, _VK_LWIN, _VK_RWIN, _VK_W = 0x11, 0x10, 0x12, 0x5B, 0x5C, 0x57
+_KEYEVENTF_KEYUP = 0x0002
 
 # Programas que nunca se pueden bloquear: partes de Windows y el propio bloqueador.
 PROTEGIDOS = frozenset({
@@ -130,3 +148,43 @@ def normalizar_app(texto: str) -> tuple[str | None, str | None]:
         return None, (f"{nombre} es parte de Windows o del propio Bloqueador; "
                       "bloquearlo podría dejar la PC inestable.")
     return nombre, None
+
+
+@dataclass(frozen=True)
+class Ventana:
+    hwnd: int
+    programa: str   # "chrome.exe", en minúsculas
+    titulo: str
+
+
+def ventana_activa() -> Ventana | None:
+    """La ventana en primer plano: de qué programa es y su título. None si no se puede saber."""
+    hwnd = _u32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    ruta = ruta_de(pid.value) if pid.value else None
+    if not ruta:
+        return None
+    largo = _u32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(max(0, largo) + 1)
+    _u32.GetWindowTextW(hwnd, buf, len(buf))
+    return Ventana(int(hwnd), ntpath.basename(ruta).lower(), buf.value)
+
+
+def cerrar_pestana(hwnd: int) -> bool:
+    """Pulsa Ctrl+W en el navegador `hwnd` para cerrar la pestaña activa. True si lo hizo.
+
+    Solo si esa ventana sigue en primer plano y no tienes apretada otra tecla que cambie el
+    atajo (con Mayús, Ctrl+Mayús+W cerraría la ventana entera).
+    """
+    if _u32.GetForegroundWindow() != hwnd:
+        return False
+    if any(_u32.GetAsyncKeyState(vk) & 0x8000 for vk in (_VK_SHIFT, _VK_MENU, _VK_LWIN, _VK_RWIN)):
+        return False
+    _u32.keybd_event(_VK_CONTROL, 0, 0, 0)
+    _u32.keybd_event(_VK_W, 0, 0, 0)
+    _u32.keybd_event(_VK_W, 0, _KEYEVENTF_KEYUP, 0)
+    _u32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+    return True

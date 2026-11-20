@@ -25,3 +25,28 @@ fun duracion(desde: LocalDateTime, hasta: LocalDateTime): String {
 }
 
 fun plural(n: Int, singular: String, varios: String): String = "$n ${if (n == 1) singular else varios}"
+
+/** Lo más largo que puede durar una sesión de concentración, en minutos (24 horas). */
+const val MAX_MINUTOS_SESION = 24 * 60
+
+/** Duración corta para un botón: "45 min", "2 h" o "1 h 30 min". */
+fun etiquetaMinutos(total: Int): String {
+    val h = total / 60
+    val m = total % 60
+    return when {
+        h == 0 -> "$m min"
+        m == 0 -> "$h h"
+        else -> "$h h $m min"
+    }
+}
+
+/**
+ * Minutos con lo escrito en las casillas de horas y minutos (vacía cuenta como 0).
+ * Null si no vale: los minutos van de 0 a 59 y el total, de 1 minuto a [maximo] (24 horas).
+ */
+fun minutosElegidos(horas: String, minutos: String, maximo: Int = MAX_MINUTOS_SESION): Int? {
+    val h = if (horas.isBlank()) 0 else horas.trim().toIntOrNull() ?: return null
+    val m = if (minutos.isBlank()) 0 else minutos.trim().toIntOrNull() ?: return null
+    if (h !in 0..24 || m !in 0..59) return null
+    return (h * 60 + m).takeIf { it in 1..maximo }
+}

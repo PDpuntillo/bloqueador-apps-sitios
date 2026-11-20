@@ -232,6 +232,11 @@ fun PantallaAjustes(
                     "pero no quitar nada ni detener el bloqueo."
             )
             Punto(
+                "Los límites diarios cuentan el tiempo que cada app o sitio está en pantalla. Para " +
+                    "los sitios, el servicio lee la barra de direcciones del navegador (no guarda las " +
+                    "direcciones). Al acabarse el tiempo, se tapa hasta las 00:00."
+            )
+            Punto(
                 "Las pestañas que ya estaban abiertas pueden seguir funcionando un rato: ciérralas o " +
                     "cierra el navegador al empezar el bloqueo."
             )

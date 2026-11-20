@@ -22,6 +22,7 @@ import android.system.StructPollfd
 import android.util.Log
 import com.bloqueador.android.R
 import com.bloqueador.android.datos.Almacen
+import com.bloqueador.android.datos.AlmacenUso
 import com.bloqueador.android.dominio.Config
 import java.io.Closeable
 import java.io.DataInputStream
@@ -52,8 +53,9 @@ import kotlin.random.Random
  * El túnel enruta una única dirección, un servidor DNS falso. Android manda ahí las consultas
  * DNS de todas las apps (menos la nuestra, que queda fuera del túnel); el resto del tráfico,
  * IPv4 e IPv6, sigue por la red real sin pasar por la VPN. Por cada consulta: si hay un bloqueo
- * activo y el dominio está en la lista (o es un subdominio de uno), se responde NXDOMAIN
- * ("no existe"); si no, se reenvía al DNS real de la red y se devuelve su respuesta.
+ * activo y el dominio está en la lista (o es un subdominio de uno), o si es de un sitio cuyo
+ * límite diario se agotó, se responde NXDOMAIN ("no existe"); si no, se reenvía al DNS real de
+ * la red y se devuelve su respuesta.
  *
  * Fuera de los bloqueos la VPN se puede evitar (allowBypass), así que funcionan las apps que se
  * atan a otra red, como las de cámaras o aparatos IoT. Durante un bloqueo, no.
@@ -74,6 +76,7 @@ class FiltroVpnService : VpnService() {
         val activo: Boolean,
         val fuente: List<String>,      // lista de la que salió [sitios], para reutilizar el Set
         val sitios: Set<String>,
+        val agotados: Set<String>,     // sitios cuyo tiempo de hoy se acabó (bloqueados con o sin bloqueo)
     )
 
     /**
@@ -152,6 +155,7 @@ class FiltroVpnService : VpnService() {
     // Protegidos por [cerrojo].
     private var ultimoActivo = false
     private var sitiosAplicados: Set<String> = emptySet()
+    private var agotadosAplicados: Set<String> = emptySet()
     private var tunelesCreados = 0
     private var fallosSeguidos = 0
 
@@ -218,6 +222,7 @@ class FiltroVpnService : VpnService() {
 
     private var conectividad: ConnectivityManager? = null
     private var quitarOyente: (() -> Unit)? = null
+    private var quitarOyenteUso: (() -> Unit)? = null
 
     /** True mientras se muestra el aviso de primer plano del arranque. Solo en el hilo principal. */
     private var enPrimerPlano = false
@@ -305,6 +310,11 @@ class FiltroVpnService : VpnService() {
             reglas = null   // aplicar el cambio desde la próxima consulta
             programar(RETRASO_CAMBIO_MS) { revisar() }
         }
+        // Se acabó el tiempo de un sitio: bloquearlo desde ya (y renovar el túnel, ver revisar).
+        quitarOyenteUso = AlmacenUso.escuchar {
+            reglas = null
+            programar(RETRASO_CAMBIO_MS) { revisar() }
+        }
         registrarRed()
     }
 
@@ -368,6 +378,8 @@ class FiltroVpnService : VpnService() {
         salirDePrimerPlano()
         seguro { quitarOyente?.invoke() }
         quitarOyente = null
+        seguro { quitarOyenteUso?.invoke() }
+        quitarOyenteUso = null
         desregistrarRed()
         seguro { reloj?.shutdownNow() }
         seguro { trabajadores?.shutdownNow() }
@@ -441,6 +453,7 @@ class FiltroVpnService : VpnService() {
         reglas = null
         ultimoActivo = activo
         sitiosAplicados = config.sitios.toHashSet()
+        agotadosAplicados = sitiosAgotados(config)
         sinRed = dePaso
         fallosRed.set(0)
         ultimoExito = SystemClock.elapsedRealtime()
@@ -559,19 +572,23 @@ class FiltroVpnService : VpnService() {
             return
         }
         val sitios = config.sitios.toHashSet()
-        val renovado = synchronized(cerrojo) { aplicarRevision(activo, sitios) }
+        val agotados = sitiosAgotados(config)
+        val renovado = synchronized(cerrojo) { aplicarRevision(activo, sitios, agotados) }
         if (renovado == false) Log.w(TAG, "No se pudo renovar el túnel")
     }
 
     /** Llamar con [cerrojo]. Devuelve null si no hizo falta renovar el túnel. */
-    private fun aplicarRevision(activo: Boolean, sitios: Set<String>): Boolean? {
+    private fun aplicarRevision(activo: Boolean, sitios: Set<String>, agotados: Set<String>): Boolean? {
         // Si se acaba de pasar al túnel de paso, se encarga la próxima revisión (volverDeSinRed).
         if (destruido || tunel == null || sinRed) return null
         // Empieza o termina un bloqueo (cambia allowBypass y hace falta una red nueva), o durante
         // uno aparecieron sitios que antes no estaban.
-        val renovar = activo != ultimoActivo || (activo && !sitiosAplicados.containsAll(sitios))
+        // También si se acabó el tiempo de un sitio: la red nueva empieza con la caché DNS vacía.
+        val renovar = activo != ultimoActivo || (activo && !sitiosAplicados.containsAll(sitios)) ||
+            !agotadosAplicados.containsAll(agotados)
         if (!renovar) {
             sitiosAplicados = sitios
+            agotadosAplicados = agotados
             return null
         }
         // Si falla, ultimoActivo y sitiosAplicados no cambian y se reintenta en la próxima revisión.
@@ -705,7 +722,7 @@ class FiltroVpnService : VpnService() {
         val consulta = PaquetesDns.analizar(paquete, largo) ?: return        // no es DNS por IPv4/UDP
         val nombre = PaquetesDns.nombreConsultado(consulta.dns) ?: return   // consulta malformada
         val r = reglasActuales()
-        if (PaquetesDns.bloquearConsulta(nombre, r.activo, r.sitios, dnsPrivado)) {
+        if (PaquetesDns.bloquearConsulta(nombre, r.activo, r.sitios, dnsPrivado, r.agotados)) {
             // Se responde al instante, sin salir del teléfono.
             val respuesta = PaquetesDns.respuestaNxdomain(consulta.dns) ?: return
             PaquetesDns.envolverRespuesta(consulta, respuesta)?.let { t.escribir(it) }
@@ -727,7 +744,7 @@ class FiltroVpnService : VpnService() {
         val config = Almacen.config
         val activo = estaActivo(config)
         val sitios = if (previas != null && previas.fuente === config.sitios) previas.sitios else config.sitios.toHashSet()
-        val nuevas = Reglas(ahora, activo, config.sitios, sitios)
+        val nuevas = Reglas(ahora, activo, config.sitios, sitios, sitiosAgotados(config))
         reglas = nuevas
         // Si el bloqueo acaba de empezar o de terminar, renovar el túnel cuanto antes (ver revisar).
         if (activo != (previas?.activo ?: false)) programar(0L) { revisar() }
@@ -924,6 +941,12 @@ class FiltroVpnService : VpnService() {
         config.estado().activo
     } catch (e: Exception) {
         false
+    }
+
+    private fun sitiosAgotados(config: Config): Set<String> = try {
+        AlmacenUso.sitiosAgotados(config)
+    } catch (e: Exception) {
+        emptySet()
     }
 
     private fun programar(retrasoMs: Long, accion: () -> Unit) {

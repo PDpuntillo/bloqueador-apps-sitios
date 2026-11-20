@@ -1,6 +1,7 @@
 package com.bloqueador.android.dominio
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import java.time.LocalDateTime
 
@@ -71,5 +72,40 @@ class FormatoTest {
         assertEquals("2 sitios", plural(2, "sitio", "sitios"))
         assertEquals("1 aplicación", plural(1, "aplicación", "aplicaciones"))
         assertEquals("3 aplicaciones", plural(3, "aplicación", "aplicaciones"))
+    }
+
+    // ---------- etiquetaMinutos() ----------
+
+    @Test
+    fun etiquetaEnHorasYMinutos() {
+        assertEquals("15 min", etiquetaMinutos(15))
+        assertEquals("1 h", etiquetaMinutos(60))
+        assertEquals("1 h 30 min", etiquetaMinutos(90))
+        assertEquals("4 h", etiquetaMinutos(240))
+        assertEquals("24 h", etiquetaMinutos(1440))
+    }
+
+    // ---------- minutosElegidos() ----------
+
+    @Test
+    fun minutosElegidosValidos() {
+        assertEquals(60, minutosElegidos("1", "0"))
+        assertEquals(150, minutosElegidos("2", "30"))
+        assertEquals(45, minutosElegidos("", "45"))
+        assertEquals(180, minutosElegidos("3", ""))
+        assertEquals(1, minutosElegidos("0", "1"))
+        assertEquals(1440, minutosElegidos(" 24 ", "0"))
+        assertEquals(125, minutosElegidos("02", "05"))
+    }
+
+    @Test
+    fun minutosElegidosNoValidos() {
+        assertNull(minutosElegidos("", ""))
+        assertNull(minutosElegidos("0", "0"))
+        assertNull(minutosElegidos("24", "1"))   // más de 24 horas
+        assertNull(minutosElegidos("25", "0"))
+        assertNull(minutosElegidos("1", "60"))
+        assertNull(minutosElegidos("-1", "30"))
+        assertNull(minutosElegidos("dos", "0"))
     }
 }

@@ -171,13 +171,23 @@ object PaquetesDns {
      * - Siempre: el canario de Firefox, para que no active solo su DNS cifrado.
      * - Durante un bloqueo ([activo]): los [sitios] y los [SERVIDORES_DOH], para que el «DNS
      *   seguro» del navegador no se salte el filtro.
+     * - Con o sin bloqueo: los [agotados] (sitios cuyo límite diario se acabó) y, si hay alguno,
+     *   también los [SERVIDORES_DOH].
      * - Nunca: [dnsPrivado], el servidor del «DNS privado» fijado en Ajustes. Android lo busca
      *   por el DNS de la VPN; si no lo encuentra, el teléfono entero se queda sin DNS.
      */
-    fun bloquearConsulta(nombre: String, activo: Boolean, sitios: Set<String>, dnsPrivado: String? = null): Boolean {
+    fun bloquearConsulta(
+        nombre: String,
+        activo: Boolean,
+        sitios: Set<String>,
+        dnsPrivado: String? = null,
+        agotados: Set<String> = emptySet(),
+    ): Boolean {
         if (Dominios.bloqueado(nombre, CANARIO)) return true
-        if (!activo || nombre == dnsPrivado) return false
-        return Dominios.bloqueado(nombre, sitios) || Dominios.bloqueado(nombre, SERVIDORES_DOH)
+        if (nombre == dnsPrivado) return false
+        if (Dominios.bloqueado(nombre, agotados)) return true
+        if (!activo && agotados.isEmpty()) return false
+        return (activo && Dominios.bloqueado(nombre, sitios)) || Dominios.bloqueado(nombre, SERVIDORES_DOH)
     }
 
     /** True si el mensaje DNS [dns] llegó truncado (bit TC): la respuesta completa va por TCP. */

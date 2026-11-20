@@ -53,12 +53,15 @@ import androidx.compose.ui.unit.dp
 import com.bloqueador.android.R
 import com.bloqueador.android.bloqueo.Servicios
 import com.bloqueador.android.datos.Almacen
+import com.bloqueador.android.datos.AlmacenUso
 import com.bloqueador.android.dominio.Config
 import com.bloqueador.android.dominio.Estado
 import com.bloqueador.android.dominio.aInstante
 import com.bloqueador.android.dominio.aLocal
 import com.bloqueador.android.dominio.cuando
 import com.bloqueador.android.dominio.duracion
+import com.bloqueador.android.dominio.etiquetaMinutos
+import com.bloqueador.android.dominio.minutosElegidos
 import com.bloqueador.android.dominio.plural
 import java.time.Instant
 import java.time.LocalDateTime
@@ -147,7 +150,12 @@ private fun TarjetaEstado(config: Config, estado: Estado, ahora: LocalDateTime) 
         plural(config.sitios.size, "sitio", "sitios"),
         plural(config.apps.size, "aplicación", "aplicaciones"),
         plural(config.horarios.size, "horario", "horarios"),
-    ).joinToString(" · ")
+        plural(config.limites.size, "límite diario", "límites diarios"),
+    ).joinToString(" · ") + when (val n = AlmacenUso.agotados(config).size) {
+        0 -> ""
+        1 -> "\nA 1 límite se le acabó el tiempo de hoy (hasta las 00:00)."
+        else -> "\nA $n límites se les acabó el tiempo de hoy (hasta las 00:00)."
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -185,40 +193,57 @@ private fun TarjetaSesion(
     val context = LocalContext.current
     val foco = LocalFocusManager.current
     var elegido by rememberSaveable { mutableStateOf(60) }
-    var texto by rememberSaveable { mutableStateOf("") }
+    var textoHoras by rememberSaveable { mutableStateOf("") }
+    var textoMinutos by rememberSaveable { mutableStateOf("") }
     var dialogo by remember { mutableStateOf<DialogoSesion?>(null) }
 
-    // El campo, si tiene algo escrito, manda sobre los chips.
-    val minutos: Int? = if (texto.isBlank()) elegido else texto.toIntOrNull()?.takeIf { it in 1..1440 }
-    val invalido = texto.isNotBlank() && minutos == null
+    // Las casillas, si tienen algo escrito, mandan sobre los chips.
+    val escrito = textoHoras.isNotBlank() || textoMinutos.isNotBlank()
+    val minutos: Int? = if (escrito) minutosElegidos(textoHoras, textoMinutos) else elegido
+    val invalido = escrito && minutos == null
 
     Tarjeta(titulo = "Sesión de concentración") {
         Text("Bloquear durante", style = MaterialTheme.typography.bodyMedium)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MINUTOS_RAPIDOS.forEach { m ->
                 FilterChip(
-                    selected = texto.isBlank() && elegido == m,
+                    selected = !escrito && elegido == m,
                     onClick = {
                         elegido = m
-                        texto = ""
+                        textoHoras = ""
+                        textoMinutos = ""
                     },
                     label = { Text(etiquetaMinutos(m)) },
                     colors = coloresChip(),
                 )
             }
         }
-        OutlinedTextField(
-            value = texto,
-            onValueChange = { nuevo -> texto = nuevo.filter { it.isDigit() }.take(4) },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Otra duración (minutos)") },
-            singleLine = true,
-            isError = invalido,
-            supportingText = {
-                Text(if (invalido) "Escribe un número de minutos entre 1 y 1440." else "Opcional: de 1 a 1440 minutos.")
-            },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { foco.clearFocus() }),
+        Text("Otra duración:", style = MaterialTheme.typography.bodyMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = textoHoras,
+                onValueChange = { nuevo -> textoHoras = nuevo.filter { it.isDigit() }.take(2) },
+                modifier = Modifier.weight(1f),
+                label = { Text("Horas") },
+                singleLine = true,
+                isError = invalido,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
+            )
+            OutlinedTextField(
+                value = textoMinutos,
+                onValueChange = { nuevo -> textoMinutos = nuevo.filter { it.isDigit() }.take(2) },
+                modifier = Modifier.weight(1f),
+                label = { Text("Minutos") },
+                singleLine = true,
+                isError = invalido,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { foco.clearFocus() }),
+            )
+        }
+        Text(
+            text = if (invalido) "Elige entre 1 minuto y 24 horas (los minutos van de 0 a 59)." else "Hasta 24 horas.",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (invalido) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Button(
             onClick = {
@@ -255,8 +280,6 @@ private fun TarjetaSesion(
         )
     }
 }
-
-private fun etiquetaMinutos(m: Int): String = if (m >= 60 && m % 60 == 0) "${m / 60} h" else "$m min"
 
 /** Cuándo terminaría una sesión de [minutos] que empieza en [ahora] (en tiempo real, no de reloj). */
 private fun finSesion(ahora: LocalDateTime, minutos: Int): LocalDateTime =
