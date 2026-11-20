@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 import tkinter as tk
 import traceback
 from dataclasses import replace
@@ -10,7 +11,9 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
 from . import autoinicio, hosts, procesos
-from .config import DIAS, MAX_MINUTOS_LIMITE, Almacen, Estado, Horario, Limite, normalizar_hora, registrar_error
+from .config import (DIAS, MAX_MINUTOS_LIMITE, AjustesCuenta, Almacen, Estado, Horario, Limite, normalizar_hora,
+                     registrar_error)
+from .cuenta import NOMBRES_POSICION, NOMBRES_TAMANO, CuentaFlotante, lineas_cuenta
 from .motor import Motor
 from .uso import Uso
 
@@ -30,6 +33,7 @@ BLOQUEADO = ("#FBE9E7", "#B3261E")
 AVISO = ("#FFF4E5", "#8A4B00")
 GRIS = "#6B6B6B"
 INTERVALO_MS = 1000
+VISTA_PREVIA_S = 4   # cuánto se ve la cuenta regresiva al cambiar su tamaño o su posición
 MAX_MINUTOS_SESION = 24 * 60
 SIN_PAUSA = "Con este horario el bloqueo no terminaría nunca: deja al menos un rato libre en la semana."
 AYUDA_SIN_FIN = ("Tus horarios cubren toda la semana sin pausa. Quita alguno en la pestaña "
@@ -167,6 +171,7 @@ class App(tk.Tk):
         self._avisos: dict[str, datetime] = {}
         self._ultimo_error = ""
         self._textos_limites: list[str] = []
+        self._previa_hasta = 0.0
         self.escala = self.winfo_fpixels("1i") / 96
 
         self.title("Bloqueador")
@@ -187,6 +192,7 @@ class App(tk.Tk):
         self._pestana_horarios()
         self._pestana_limites()
         self._pestana_ajustes()
+        self.cuenta = CuentaFlotante(self, self.escala)
 
         self._refrescar_listas()
         self._sincronizar_autoinicio()
@@ -349,9 +355,35 @@ class App(tk.Tk):
                        "queda bloqueado hasta las 00:00. Los sitios se reconocen por el título de la "
                        "pestaña (por ejemplo «Instagram» o «YouTube»). Un límite agotado no se puede "
                        "quitar ni aumentar hasta el día siguiente.").pack(anchor="w", pady=(8, 8))
+        self._crear_opciones_cuenta(tab)
         self.lista_limites = Lista(tab, "No hay límites diarios.")
         self.lista_limites.pack(fill="both", expand=True)
         self.btn_quitar_limite, self.lbl_cuenta_limites = self._fila_quitar(tab, self._quitar_limites)
+
+    def _crear_opciones_cuenta(self, tab: ttk.Frame) -> None:
+        """Opciones de la cuenta regresiva flotante (al pie de la pestaña Límites diarios)."""
+        ajustes = self.almacen.cfg.cuenta
+        marco = ttk.LabelFrame(tab, text=" Cuenta regresiva en pantalla ", padding=(12, 8))
+        marco.pack(side="bottom", fill="x", pady=(10, 0))
+        self.var_cuenta = tk.BooleanVar(value=ajustes.visible)
+        ttk.Checkbutton(marco, variable=self.var_cuenta, command=self._cambiar_cuenta,
+                        text="Mostrar en una esquina cuánto le queda a la app o al sitio que estás usando"
+                        ).pack(anchor="w")
+        fila = ttk.Frame(marco)
+        fila.pack(fill="x", pady=(6, 0))
+        ttk.Label(fila, text="Tamaño").pack(side="left")
+        self.cmb_cuenta_tamano = ttk.Combobox(fila, state="readonly", width=9,
+                                              values=list(NOMBRES_TAMANO.values()))
+        self.cmb_cuenta_tamano.set(NOMBRES_TAMANO[ajustes.tamano])
+        self.cmb_cuenta_tamano.pack(side="left", padx=(6, 14))
+        ttk.Label(fila, text="Posición").pack(side="left")
+        self.cmb_cuenta_posicion = ttk.Combobox(fila, state="readonly", width=21,
+                                                values=list(NOMBRES_POSICION.values()))
+        self.cmb_cuenta_posicion.set(NOMBRES_POSICION[ajustes.posicion])
+        self.cmb_cuenta_posicion.pack(side="left", padx=(6, 0))
+        for cmb in (self.cmb_cuenta_tamano, self.cmb_cuenta_posicion):
+            cmb.bind("<<ComboboxSelected>>", lambda _e: self._cambiar_cuenta())
+        ttk.Button(fila, text="Ver cómo queda", command=self._vista_previa_cuenta).pack(side="right")
 
     def _pestana_ajustes(self) -> None:
         tab = ttk.Frame(self.nb, padding=14)
@@ -403,8 +435,39 @@ class App(tk.Tk):
             self._toast(f"aviso:{limite.clave}", f"Te quedan 5 minutos de {limite.nombre}",
                         "Después se bloquea hasta mañana.", ahora, colores=AVISO)
         self._actualizar_vista(ahora)
+        self._actualizar_cuenta()
         if repetir:
             self.after(INTERVALO_MS, self._ciclo)
+
+    def _actualizar_cuenta(self) -> None:
+        """Muestra la cuenta regresiva de lo que tiene límite y está a la vista, o la oculta."""
+        ajustes = self.almacen.cfg.cuenta
+        try:
+            if time.monotonic() < self._previa_hasta:
+                self.cuenta.mostrar(self._lineas_vista_previa(), ajustes, self._hwnd_propio())
+            elif ajustes.visible and self.motor.en_pantalla:
+                ventana = self.motor.ventana
+                self.cuenta.mostrar(lineas_cuenta(self.motor.en_pantalla, self.motor.uso.datos), ajustes,
+                                    ventana.hwnd if ventana else None)
+            else:
+                self.cuenta.ocultar()
+        except (tk.TclError, OSError):   # la cuenta es solo un aviso: no debe cortar el ciclo
+            detalle = traceback.format_exc()
+            if detalle != self._ultimo_error:
+                self._ultimo_error = detalle
+                registrar_error(detalle)
+
+    def _lineas_vista_previa(self) -> list[tuple[str, float]]:
+        """Para ver cómo queda: tu primer límite con tiempo, o uno de ejemplo."""
+        uso = self.motor.uso.datos
+        con_tiempo = [l for l in self.almacen.cfg.limites if not uso.agotado(l)]
+        return lineas_cuenta(con_tiempo[:1], uso) or [("instagram.com", 24 * 60 + 59)]
+
+    def _hwnd_propio(self) -> int | None:
+        try:
+            return int(self.wm_frame(), 16)
+        except (tk.TclError, ValueError):
+            return None
 
     def _actualizar_vista(self, ahora: datetime) -> None:
         e, cfg = self.estado, self.almacen.cfg
@@ -538,6 +601,8 @@ class App(tk.Tk):
         t.update_idletasks()
         x = t.winfo_screenwidth() - t.winfo_reqwidth() - self.px(24)
         y = t.winfo_screenheight() - t.winfo_reqheight() - self.px(72)
+        if self.cuenta.visible and self.almacen.cfg.cuenta.posicion == "abajo_der":
+            y -= self.cuenta.alto() + self.px(8)   # encima de la cuenta regresiva, sin taparla
         t.geometry(f"+{x}+{y}")
         t.after(4500, lambda: self._cerrar_toast(t))
 
@@ -789,6 +854,35 @@ class App(tk.Tk):
         claves = {l.clave for l in quitar}
         cfg.limites = [l for l in cfg.limites if l.clave not in claves]
         self._guardar_y_aplicar()
+
+    def _cambiar_cuenta(self) -> None:
+        """Guarda las opciones de la cuenta regresiva y la muestra un momento para ver cómo queda."""
+        tamanos = {v: k for k, v in NOMBRES_TAMANO.items()}
+        posiciones = {v: k for k, v in NOMBRES_POSICION.items()}
+        cfg = self.almacen.cfg
+        cfg.cuenta = AjustesCuenta(
+            visible=self.var_cuenta.get(),
+            tamano=tamanos.get(self.cmb_cuenta_tamano.get(), cfg.cuenta.tamano),
+            posicion=posiciones.get(self.cmb_cuenta_posicion.get(), cfg.cuenta.posicion),
+        )
+        try:
+            self.almacen.guardar()
+        except OSError as e:
+            messagebox.showerror("No se pudo guardar", str(e), parent=self)
+        if cfg.cuenta.visible:
+            self._vista_previa_cuenta()
+        else:
+            self._previa_hasta = 0.0
+            self._actualizar_cuenta()
+            self._pie("Cuenta regresiva desactivada.")
+
+    def _vista_previa_cuenta(self) -> None:
+        self._previa_hasta = time.monotonic() + VISTA_PREVIA_S
+        self._actualizar_cuenta()
+        texto = "Así se ve la cuenta regresiva."
+        if not self.almacen.cfg.cuenta.visible:
+            texto += " Está desactivada: marca la casilla para verla mientras usas algo con límite."
+        self._pie(texto)
 
     def _sincronizar_autoinicio(self) -> None:
         if self.modo_prueba:

@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Process
 import android.provider.Settings
 import com.bloqueador.android.datos.Almacen
+import java.util.concurrent.CopyOnWriteArrayList
 
 /** Estado de los dos servicios de bloqueo y ayudas para activarlos desde la interfaz. */
 object Servicios {
@@ -74,6 +75,23 @@ object Servicios {
      */
     @Volatile
     var permitirDialogoVpnHasta: Long = 0L
+
+    private val oyentesVistaPrevia = CopyOnWriteArrayList<() -> Unit>()
+
+    /**
+     * Pide a ServicioAccesibilidad que muestre la cuenta regresiva unos segundos, para ver cómo
+     * queda. Se llama desde el hilo principal. Devuelve false si el servicio no está conectado.
+     */
+    fun verCuentaRegresiva(): Boolean {
+        oyentesVistaPrevia.forEach { it() }
+        return oyentesVistaPrevia.isNotEmpty()
+    }
+
+    /** Lo usa ServicioAccesibilidad mientras está conectado. Devuelve una función para darlo de baja. */
+    fun escucharVistaPrevia(oyente: () -> Unit): () -> Unit {
+        oyentesVistaPrevia += oyente
+        return { oyentesVistaPrevia -= oyente }
+    }
 
     /** True si el usuario activó nuestro servicio en Ajustes > Accesibilidad. */
     fun accesibilidadHabilitada(context: Context): Boolean {

@@ -30,6 +30,9 @@ class Motor:
         self.agotados: list[Limite] = []        # límites sin tiempo hoy
         self.por_agotarse: list[Limite] = []    # les acaban de quedar menos de 5 minutos
         self.pestanas_cerradas: list[str] = []  # sitios a los que se les cerró la pestaña
+        # Lo que está a la vista, para la cuenta regresiva: la ventana activa y sus límites con tiempo.
+        self.ventana: procesos.Ventana | None = None
+        self.en_pantalla: list[Limite] = []
 
     def paso(self, ahora: datetime | None = None) -> tuple[Estado, list[str]]:
         """Revisa el estado y lo aplica. Devuelve el estado y las apps que cerró."""
@@ -49,10 +52,13 @@ class Motor:
         estado = cfg.estado(ahora)
         ventana = self._leer_ventana() if cfg.limites else None
         try:
-            self._contar_uso(ventana, ahora)
+            en_uso = self._contar_uso(ventana, ahora)
         except OSError as e:
             errores.append(f"No se pudo guardar el tiempo de uso ({e}).")
+            en_uso = limites_en_uso(cfg.limites, ventana.programa, ventana.titulo) if ventana else []
         self.agotados = [l for l in cfg.limites if self.uso.datos.agotado(l)]
+        self.ventana = ventana
+        self.en_pantalla = [l for l in en_uso if not self.uso.datos.agotado(l)]
 
         sitios = set(cfg.sitios) if estado.activo else set()
         sitios |= {l.nombre for l in self.agotados if l.tipo == "sitio"}
@@ -92,8 +98,9 @@ class Motor:
         except OSError:
             return None
 
-    def _contar_uso(self, ventana: procesos.Ventana | None, ahora: datetime) -> None:
-        """Suma el tiempo desde el paso anterior a las apps y sitios con límite que están a la vista."""
+    def _contar_uso(self, ventana: procesos.Ventana | None, ahora: datetime) -> list[Limite]:
+        """Suma el tiempo desde el paso anterior a las apps y sitios con límite que están a la vista.
+        Devuelve esos límites."""
         uso, limites = self.uso.datos, self.almacen.cfg.limites
         self.por_agotarse = []
         anterior, self._ultimo_paso = self._ultimo_paso, ahora
@@ -116,6 +123,7 @@ class Motor:
         if (reinicio and limites) or agotado_ahora or (en_uso and (hace is None or not 0 <= hace < GUARDAR_USO_S)):
             self._uso_guardado = ahora
             self.uso.guardar()
+        return en_uso
 
     def _puede_cerrar_pestana(self, hwnd: int, ahora: datetime) -> bool:
         if self._pestana_cerrada is None:

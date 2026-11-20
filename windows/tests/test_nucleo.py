@@ -14,8 +14,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nucleo import hosts, procesos, uso  # noqa: E402
-from nucleo.config import Almacen, Config, Estado, Horario, Limite, normalizar_hora  # noqa: E402
+from nucleo import cuenta, hosts, procesos, uso  # noqa: E402
+from nucleo.config import AjustesCuenta, Almacen, Config, Estado, Horario, Limite, normalizar_hora  # noqa: E402
 from nucleo.motor import Motor  # noqa: E402
 from nucleo.uso import Uso  # noqa: E402
 
@@ -691,6 +691,23 @@ class TestMotorLimites(unittest.TestCase):
             self.assertEqual(motor.uso.datos.usados(l), 0)
             self.assertFalse(motor.hay_agotados())
 
+    def test_en_pantalla_lo_que_tiene_limite_y_tiempo(self):
+        with tempfile.TemporaryDirectory() as d:
+            ventana = VentanaFalsa()
+            l = Limite("sitio", "instagram.com", 1)
+            motor, _ = self.preparar(d, [l, Limite("app", "discord.exe", 30)], ventana)
+            inicio = LUNES.replace(hour=10)
+            self.correr(motor, inicio, 10)
+            self.assertEqual(motor.en_pantalla, [l])
+            self.assertEqual(motor.ventana.hwnd, 7)
+            ventana.actual = procesos.Ventana(7, "chrome.exe", "Gatitos - YouTube - Google Chrome")
+            motor.paso(inicio + timedelta(seconds=11))
+            self.assertEqual(motor.en_pantalla, [])
+            ventana.actual = procesos.Ventana(7, "chrome.exe", "Instagram - Google Chrome")
+            self.correr(motor, inicio + timedelta(seconds=12), 51)
+            self.assertEqual(motor.agotados, [l])
+            self.assertEqual(motor.en_pantalla, [])        # sin tiempo: ya no hay cuenta, se bloquea
+
     def test_cierra_la_app_agotada_sin_bloqueo(self):
         if any(n.lower() == "ping.exe" for _, n in procesos.listar()):
             self.skipTest("Ya hay un ping.exe abierto; no se toca.")
@@ -795,6 +812,99 @@ class TestInterfazLimites(unittest.TestCase):
             interfaz.App._agregar_limite(v)
         pregunta.assert_called_once()
         self.assertEqual(cfg.limites, [])
+
+
+class TestCuentaRegresiva(unittest.TestCase):
+    def test_formato(self):
+        casos = {1499.0: "24:59", 1499.2: "25:00", 59.2: "1:00", 60: "1:00", 0.4: "0:01", 0: "0:00",
+                 -3: "0:00", 3600: "1:00:00", 3723: "1:02:03", 60.0000001: "1:00"}
+        for segundos, texto in casos.items():
+            with self.subTest(segundos=segundos):
+                self.assertEqual(cuenta.texto_restante(segundos), texto)
+
+    def test_lineas_nombres_y_aviso(self):
+        u = Uso("2026-11-16", {"sitio:instagram.com": 25 * 60})
+        lineas = cuenta.lineas_cuenta([Limite("app", "chrome.exe", 60), Limite("sitio", "instagram.com", 30)], u)
+        self.assertEqual(lineas, [("instagram.com", 300), ("chrome", 3600)])   # la más urgente arriba
+        self.assertEqual(cuenta.texto_cuenta(lineas), "instagram.com   5:00\nchrome   1:00:00")
+        self.assertTrue(cuenta.en_aviso(lineas))
+        self.assertFalse(cuenta.en_aviso(lineas[1:]))
+
+    def test_esquinas(self):
+        esperado = {"arriba_izq": (12, 12), "arriba_der": (1808, 12),
+                    "abajo_izq": (12, 988), "abajo_der": (1808, 988)}
+        for posicion, xy in esperado.items():
+            with self.subTest(posicion=posicion):
+                self.assertEqual(cuenta.posicion_en_area((0, 0, 1920, 1040), 100, 40, posicion, 12), xy)
+        # Una pantalla a la izquierda de la principal tiene coordenadas negativas.
+        self.assertEqual(cuenta.posicion_en_area((-1280, 0, 0, 984), 100, 40, "arriba_izq", 12), (-1268, 12))
+        self.assertEqual(cuenta.posicion_en_area((-1280, 0, 0, 984), 100, 40, "abajo_der", 12), (-112, 932))
+        # Nunca se sale por arriba ni por la izquierda.
+        self.assertEqual(cuenta.posicion_en_area((0, 0, 300, 200), 500, 300, "abajo_der", 12), (0, 0))
+
+    def test_ajustes_se_guardan_y_se_validan(self):
+        self.assertEqual(Config().cuenta, AjustesCuenta(True, "mediano", "abajo_der"))
+        with tempfile.TemporaryDirectory() as d:
+            alm = Almacen(os.path.join(d, "config.json"))
+            alm.cfg.cuenta = AjustesCuenta(False, "grande", "arriba_izq")
+            alm.guardar()
+            self.assertEqual(Almacen(alm.ruta).cfg.cuenta, AjustesCuenta(False, "grande", "arriba_izq"))
+        self.assertEqual(Config.desde_dict({"cuenta": {"tamano": "enorme", "posicion": "centro"}}).cuenta,
+                         AjustesCuenta())
+        self.assertEqual(Config.desde_dict({"cuenta": "roto"}).cuenta, AjustesCuenta())
+        self.assertEqual(Config.desde_dict({"sitios": ["a.com"]}).cuenta, AjustesCuenta())   # config vieja
+
+
+@unittest.skipIf(interfaz is None, "tkinter no está disponible")
+class TestInterfazCuenta(unittest.TestCase):
+    def ventana(self, ajustes=None, en_pantalla=(), limites=(), usados=None):
+        cfg = Config(limites=list(limites), cuenta=ajustes or AjustesCuenta())
+        v = types.SimpleNamespace(
+            almacen=mock.Mock(cfg=cfg), cuenta=mock.Mock(), _pie=mock.Mock(), _previa_hasta=0.0,
+            _ultimo_error="", _hwnd_propio=lambda: 99,
+            motor=types.SimpleNamespace(en_pantalla=list(en_pantalla), ventana=procesos.Ventana(7, "chrome.exe", "x"),
+                                        uso=types.SimpleNamespace(datos=Uso("2026-11-16", usados or {}))))
+        for nombre in ("_actualizar_cuenta", "_lineas_vista_previa", "_vista_previa_cuenta"):
+            setattr(v, nombre, types.MethodType(getattr(interfaz.App, nombre), v))
+        return v
+
+    def test_muestra_lo_que_esta_a_la_vista_o_se_oculta(self):
+        l = Limite("sitio", "instagram.com", 30)
+        v = self.ventana(en_pantalla=[l], usados={"sitio:instagram.com": 600})
+        v._actualizar_cuenta()
+        v.cuenta.mostrar.assert_called_once_with([("instagram.com", 1200)], v.almacen.cfg.cuenta, 7)
+        v = self.ventana(en_pantalla=[])
+        v._actualizar_cuenta()
+        v.cuenta.ocultar.assert_called_once()
+        v = self.ventana(ajustes=AjustesCuenta(visible=False), en_pantalla=[l])
+        v._actualizar_cuenta()
+        v.cuenta.ocultar.assert_called_once()
+        v.cuenta.mostrar.assert_not_called()
+
+    def test_vista_previa_aunque_no_haya_nada_a_la_vista(self):
+        v = self.ventana(ajustes=AjustesCuenta(visible=False))
+        v._vista_previa_cuenta()
+        v.cuenta.mostrar.assert_called_once_with([("instagram.com", 24 * 60 + 59)], v.almacen.cfg.cuenta, 99)
+        self.assertIn("desactivada", v._pie.call_args.args[0])
+        # Con límites, usa el primero que tiene tiempo.
+        v = self.ventana(limites=[Limite("app", "discord.exe", 10), Limite("sitio", "x.com", 20)],
+                         usados={"app:discord.exe": 600})
+        v._vista_previa_cuenta()
+        v.cuenta.mostrar.assert_called_once_with([("x.com", 1200)], v.almacen.cfg.cuenta, 99)
+
+    def test_cambiar_opciones_las_guarda(self):
+        v = self.ventana()
+        v.var_cuenta = Valor(True)
+        v.cmb_cuenta_tamano = mock.Mock(get=mock.Mock(return_value="Grande"))
+        v.cmb_cuenta_posicion = mock.Mock(get=mock.Mock(return_value="Arriba a la izquierda"))
+        interfaz.App._cambiar_cuenta(v)
+        self.assertEqual(v.almacen.cfg.cuenta, AjustesCuenta(True, "grande", "arriba_izq"))
+        v.almacen.guardar.assert_called_once()
+        v.cuenta.mostrar.assert_called_once()           # se ve un momento, para ver cómo queda
+        v.var_cuenta = Valor(False)
+        interfaz.App._cambiar_cuenta(v)
+        self.assertFalse(v.almacen.cfg.cuenta.visible)
+        v.cuenta.ocultar.assert_called_once()
 
 
 if __name__ == "__main__":

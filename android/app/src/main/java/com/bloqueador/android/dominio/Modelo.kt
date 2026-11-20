@@ -126,6 +126,7 @@ data class Config(
     val sesionFin: Instant? = null,             // cuándo termina la sesión (instante: no le afecta la zona horaria)
     val modoEstricto: Boolean = false,          // durante un bloqueo, bloquear también Ajustes y el desinstalador
     val limites: List<Limite> = emptyList(),    // límites diarios, ordenados por tipo y nombre
+    val cuenta: AjustesCuenta = AjustesCuenta(), // la cuenta regresiva flotante de los límites
 ) {
     fun limite(tipo: TipoLimite, nombre: String): Limite? = limites.firstOrNull { it.tipo == tipo && it.nombre == nombre }
 
@@ -204,6 +205,7 @@ data class Config(
             .put("limites", JSONArray(limites.map {
                 JSONObject().put("tipo", it.tipo.clave).put("nombre", it.nombre).put("minutos", it.minutos)
             }))
+            .put("cuenta", cuenta.aJson())
             .toString()
     }
 
@@ -223,6 +225,7 @@ data class Config(
                     sesionFin = leerSesion(o),
                     modoEstricto = o.optBoolean("modo_estricto", false),
                     limites = leerLimites(o.optJSONArray("limites")),
+                    cuenta = AjustesCuenta.desdeJson(o.optJSONObject("cuenta")),
                 )
             } catch (e: JSONException) {
                 Config()

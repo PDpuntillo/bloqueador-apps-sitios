@@ -1,4 +1,4 @@
-"""Configuración del bloqueador: listas, horarios, límites diarios y sesión de concentración.
+"""Configuración del bloqueador: listas, horarios, límites diarios, cuenta regresiva y sesión.
 
 Se guarda como JSON en %PROGRAMDATA%\\Bloqueador\\config.json.
 """
@@ -117,6 +117,29 @@ class Limite:
         return f"{self.tipo}:{self.nombre}"
 
 
+TAMANOS_CUENTA = ("chico", "mediano", "grande")
+POSICIONES_CUENTA = ("arriba_izq", "arriba_der", "abajo_izq", "abajo_der")
+
+
+@dataclass
+class AjustesCuenta:
+    """La cuenta regresiva flotante que muestra cuánto le queda a lo que tiene límite y está a la vista."""
+    visible: bool = True
+    tamano: str = "mediano"        # uno de TAMANOS_CUENTA
+    posicion: str = "abajo_der"    # una de POSICIONES_CUENTA (siempre una esquina de la pantalla)
+
+    @classmethod
+    def desde_dict(cls, d) -> "AjustesCuenta":
+        if not isinstance(d, dict):
+            return cls()
+        tamano, posicion = d.get("tamano"), d.get("posicion")
+        return cls(
+            visible=bool(d.get("visible", True)),
+            tamano=tamano if tamano in TAMANOS_CUENTA else cls.tamano,
+            posicion=posicion if posicion in POSICIONES_CUENTA else cls.posicion,
+        )
+
+
 @dataclass
 class Estado:
     activo: bool
@@ -133,6 +156,7 @@ class Config:
     sesion_fin: str | None = None   # fecha y hora ISO en que termina la sesión
     autoinicio: bool = False
     limites: list[Limite] = field(default_factory=list)   # límites diarios, ordenados por tipo y nombre
+    cuenta: AjustesCuenta = field(default_factory=AjustesCuenta)
 
     def limite(self, tipo: str, nombre: str) -> Limite | None:
         return next((l for l in self.limites if l.tipo == tipo and l.nombre == nombre), None)
@@ -235,6 +259,7 @@ class Config:
             sesion_fin=d.get("sesion_fin") or None,
             autoinicio=bool(d.get("autoinicio", False)),
             limites=sorted(limites.values(), key=lambda l: (l.tipo, l.nombre)),
+            cuenta=AjustesCuenta.desde_dict(d.get("cuenta")),
         )
 
 

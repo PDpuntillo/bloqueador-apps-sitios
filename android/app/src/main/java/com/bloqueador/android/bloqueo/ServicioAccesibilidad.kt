@@ -26,9 +26,11 @@ import com.bloqueador.android.datos.AlmacenUso
 import com.bloqueador.android.dominio.Config
 import com.bloqueador.android.dominio.Dominios
 import com.bloqueador.android.dominio.Limite
+import com.bloqueador.android.dominio.LineaCuenta
 import com.bloqueador.android.dominio.Paquetes
 import com.bloqueador.android.dominio.TipoLimite
 import com.bloqueador.android.dominio.limitesEnUso
+import com.bloqueador.android.dominio.restantesEnPantalla
 
 /**
  * Detecta qué app pasa a primer plano y, si está bloqueada, la tapa con [PantallaBloqueoActivity].
@@ -38,7 +40,8 @@ import com.bloqueador.android.dominio.limitesEnUso
  * dividida o en una ventana flotante sigue a la vista.
  *
  * También cuenta el tiempo de uso de las apps y los sitios con límite diario y, cuando se acaba,
- * los tapa hasta las 00:00, haya o no un bloqueo.
+ * los tapa hasta las 00:00, haya o no un bloqueo. Mientras usas algo con límite, muestra en una
+ * esquina cuánto le queda ([CuentaFlotante]).
  *
  * Solo usa el nombre de paquete y la clase de cada ventana. La única excepción: si pusiste
  * límite a algún sitio, lee la barra de direcciones del navegador que está a la vista (solo esa
@@ -86,6 +89,37 @@ class ServicioAccesibilidad : AccessibilityService() {
 
     // Última vez que se contó el tiempo de uso (SystemClock.elapsedRealtime), o 0.
     private var ultimoConteo = 0L
+
+    // Cuenta regresiva: su ventana, los límites con tiempo de lo que está a la vista, hasta cuándo
+    // se muestra la vista previa (SystemClock.elapsedRealtime) y el nombre visible de cada app.
+    private var cuenta: CuentaFlotante? = null
+    private var enPantalla: List<Limite> = emptyList()
+    private var vistaPreviaHasta = 0L
+    private val nombresApps = HashMap<String, String>()
+    private var quitarOyentes: List<() -> Unit> = emptyList()
+
+    /** Baja la cuenta regresiva cada segundo mientras se ve. */
+    private val ticCuenta = Runnable { actualizarCuenta(porTic = true) }
+
+    /** Al cambiar de app (o de ajustes): muestra u oculta la cuenta sin esperar a la revisión. */
+    private val refrescoCuenta = Runnable {
+        try {
+            val config = Almacen.config
+            enPantalla = if (conectado) limitesALaVista(config, primerPlano(config)) else emptyList()
+            actualizarCuenta()
+        } catch (e: Exception) {
+            // La próxima revisión la deja bien.
+        }
+    }
+
+    /** Cuando la cuenta llega a cero: se cuenta y se bloquea sin esperar a la revisión periódica. */
+    private val revisionInmediata = Runnable {
+        try {
+            if (conectado) revisar()
+        } catch (e: Exception) {
+            // Lo hace la revisión periódica.
+        }
+    }
 
     /** Revisión periódica mientras el servicio está conectado. */
     private val revision = object : Runnable {
@@ -147,6 +181,24 @@ class ServicioAccesibilidad : AccessibilityService() {
         }
         handler.removeCallbacks(revision)
         handler.postDelayed(revision, INTERVALO_MS)
+
+        cuenta = CuentaFlotante(this)
+        quitarOyentes.forEach { it() }
+        quitarOyentes = listOf(
+            Servicios.escucharVistaPrevia {
+                handler.post {
+                    vistaPreviaHasta = SystemClock.elapsedRealtime() + VISTA_PREVIA_MS
+                    actualizarCuenta()
+                }
+            },
+            // Si cambian los límites o las opciones de la cuenta, se nota en seguida.
+            Almacen.escuchar { nueva ->
+                handler.post {
+                    if (!nueva.cuenta.visible) vistaPreviaHasta = 0L
+                    programarRefrescoCuenta()
+                }
+            },
+        )
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -186,6 +238,10 @@ class ServicioAccesibilidad : AccessibilityService() {
         ventanasPendientes = false
         Servicios.accesibilidadConectada = false
         handler.removeCallbacksAndMessages(null)
+        quitarOyentes.forEach { it() }
+        quitarOyentes = emptyList()
+        enPantalla = emptyList()
+        cuenta?.ocultar()
     }
 
     // ------------------------------------------------------------------ reglas
@@ -210,6 +266,7 @@ class ServicioAccesibilidad : AccessibilityService() {
             handler.removeCallbacks(revisionSitio)
             handler.postDelayed(revisionSitio, ESPERA_SITIO_MS)
         }
+        if (config.limites.isNotEmpty() || cuenta?.visible == true) programarRefrescoCuenta()
     }
 
     /**
@@ -390,6 +447,8 @@ class ServicioAccesibilidad : AccessibilityService() {
         val activo = config.estado().activo
         if (config.limites.isEmpty()) {
             ultimoConteo = 0L
+            enPantalla = emptyList()
+            actualizarCuenta()
             if (!activo) {
                 intentosPip.clear()
                 return
@@ -404,6 +463,12 @@ class ServicioAccesibilidad : AccessibilityService() {
             contarUso(config, vista)
         } catch (e: Exception) {
             // Se pierde este rato: la próxima revisión sigue contando.
+        }
+        try {
+            enPantalla = limitesALaVista(config, vista)
+            actualizarCuenta()
+        } catch (e: Exception) {
+            // Solo es un aviso.
         }
         val agotados = AlmacenUso.agotados(config)
         if (!activo && agotados.isEmpty()) {
@@ -497,6 +562,71 @@ class ServicioAccesibilidad : AccessibilityService() {
             }
         }
     }
+
+    // ------------------------------------------------------- cuenta regresiva
+
+    /** Los límites con tiempo de lo que está a la vista; vacío con la pantalla apagada o bloqueada. */
+    private fun limitesALaVista(config: Config, vista: Vista?): List<Limite> {
+        if (vista == null || vista.paquete == packageName || config.limites.isEmpty() || !pantallaEnUso()) {
+            return emptyList()
+        }
+        val hoy = AlmacenUso.hoy()
+        return limitesEnUso(config, vista.paquete, vista.sitio).filter { !hoy.agotado(it) }
+    }
+
+    private fun programarRefrescoCuenta() {
+        if (!conectado) return
+        handler.removeCallbacks(refrescoCuenta)
+        handler.postDelayed(refrescoCuenta, ESPERA_CUENTA_MS)
+    }
+
+    /**
+     * Muestra, actualiza u oculta la cuenta regresiva. Mientras se ve, se repite cada segundo
+     * ([porTic] es true en esas repeticiones).
+     */
+    private fun actualizarCuenta(porTic: Boolean = false) {
+        handler.removeCallbacks(ticCuenta)
+        val c = cuenta ?: return
+        if (!conectado) {
+            c.ocultar()
+            return
+        }
+        val config = Almacen.config
+        val ahora = SystemClock.elapsedRealtime()
+        val previa = ahora < vistaPreviaHasta
+        val lineas = when {
+            previa -> lineasVistaPrevia(config)
+            config.cuenta.visible && enPantalla.isNotEmpty() && pantallaEnUso() -> {
+                // Lo que pasó desde la última revisión todavía no se sumó al uso.
+                val pendiente = if (ultimoConteo == 0L) 0L else minOf(ahora - ultimoConteo, MAX_PASO_MS)
+                restantesEnPantalla(enPantalla, AlmacenUso.hoy(), pendiente).map { (l, ms) ->
+                    LineaCuenta(nombreCuenta(l), ms)
+                }
+            }
+            else -> emptyList()
+        }
+        if (lineas.isEmpty()) {
+            c.ocultar()
+            return
+        }
+        c.mostrar(lineas, config.cuenta)
+        if (porTic && !previa && lineas.any { it.ms <= 0L }) {
+            handler.removeCallbacks(revisionInmediata)
+            handler.post(revisionInmediata)
+        }
+        handler.postDelayed(ticCuenta, TIC_CUENTA_MS)
+    }
+
+    /** Para ver cómo queda: tu primer límite con tiempo, o uno de ejemplo. */
+    private fun lineasVistaPrevia(config: Config): List<LineaCuenta> {
+        val hoy = AlmacenUso.hoy()
+        val l = config.limites.firstOrNull { !hoy.agotado(it) }
+            ?: return listOf(LineaCuenta("Instagram", EJEMPLO_CUENTA_MS))
+        return listOf(LineaCuenta(nombreCuenta(l), hoy.restantesMs(l)))
+    }
+
+    private fun nombreCuenta(l: Limite): String =
+        if (l.tipo == TipoLimite.SITIO) l.nombre else nombresApps.getOrPut(l.nombre) { nombreVisible(l.nombre) }
 
     private fun programarRevisionVentanas() {
         if (!conectado || ventanasPendientes) return
@@ -675,8 +805,9 @@ class ServicioAccesibilidad : AccessibilityService() {
             // Solo con launchers conocidos, para no bloquear nunca la pantalla de inicio.
             leerEstrictos()?.let { estrictos = it }
         }
-        // Por si una app se actualizó y cambió sus actividades.
+        // Por si una app se actualizó y cambió sus actividades o su nombre.
         actividades.clear()
+        nombresApps.clear()
     }
 
     /** Apps que responden a la pantalla de inicio (launchers). Devuelve null si falla. */
@@ -803,5 +934,9 @@ class ServicioAccesibilidad : AccessibilityService() {
         const val VENTANA_USO_MS = 10 * 60_000L  // estadísticas de uso que se miran (ventanas ocultas)
         const val MAX_PASO_MS = 10_000L          // un rato más largo entre revisiones no cuenta como uso
         const val ESPERA_SITIO_MS = 500L         // al abrir un navegador, cuándo se mira qué sitio muestra
+        const val TIC_CUENTA_MS = 1_000L         // la cuenta regresiva baja cada segundo
+        const val ESPERA_CUENTA_MS = 400L        // al cambiar de app, cuándo se revisa la cuenta regresiva
+        const val VISTA_PREVIA_MS = 4_000L       // cuánto se ve la cuenta al cambiar su tamaño o su posición
+        const val EJEMPLO_CUENTA_MS = (24 * 60 + 59) * 1000L   // la vista previa, si no hay límites
     }
 }

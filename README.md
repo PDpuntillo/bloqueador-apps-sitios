@@ -28,7 +28,7 @@ Cada dispositivo tiene sus propias listas (no se sincronizan).
 | **Sitios web** | Escribe una dirección (`youtube.com`) o usa los botones de *Agregar rápido*. |
 | **Aplicaciones** | Despliega la lista de programas abiertos, escribe el nombre (`discord.exe`) o usa *Examinar…*. |
 | **Horarios** | Elige días y horas. Si la hora final es menor que la inicial, termina al día siguiente (22:00 → 07:00). Si las dos horas son iguales, dura 24 h (`00:00 → 00:00` bloquea el día completo). Los horarios tienen que dejar al menos un rato libre en la semana: el programa rechaza los que harían que el bloqueo no terminara nunca. Si un horario termina justo cuando empieza otro, el fin que se muestra es el del último de la cadena. |
-| **Límites diarios** | Un máximo de uso por día para cada sitio o programa (por ejemplo, `instagram.com`, 30 minutos). La lista muestra cuánto usaste hoy y cuánto te queda. Ver *Límites diarios* más abajo. |
+| **Límites diarios** | Un máximo de uso por día para cada sitio o programa (por ejemplo, `instagram.com`, 30 minutos). La lista muestra cuánto usaste hoy y cuánto te queda. Al pie, las opciones de la cuenta regresiva en pantalla. Ver *Límites diarios* más abajo. |
 | **Ajustes** | Inicio automático con Windows, cómo funciona y *Salir del Bloqueador*. |
 
 Arriba de las pestañas está el recuadro **Sesión de concentración**: bloquea todo durante las
@@ -53,6 +53,12 @@ semana (un bloqueo "sin fin"), sí puedes quitar horarios para que el bloqueo pu
 - Agregar un límite o bajarlo se puede siempre. **Quitarlo o aumentarlo, no** durante un bloqueo
   ni si hoy ya se acabó su tiempo. Mientras haya un límite agotado, el programa tampoco se puede
   cerrar (la X lo minimiza).
+- **Cuenta regresiva:** mientras usas algo con límite, una ventanita en una esquina de la
+  pantalla muestra cuánto le queda hoy (`instagram.com   12:34`), y se pone roja en los últimos
+  5 minutos. No recibe el foco ni los clics, que pasan a la ventana de abajo. Al pie de la
+  pestaña *Límites diarios* se elige su tamaño (chico, mediano o grande) y su esquina
+  (arriba o abajo, a la izquierda o a la derecha), o se desactiva. *Ver cómo queda* la muestra
+  unos segundos.
 - El tiempo de hoy se guarda en `C:\ProgramData\Bloqueador\uso.json`.
 
 ### Cómo funciona
@@ -109,6 +115,7 @@ windows/
   bloqueador.pyw        punto de entrada: pide permisos y abre la ventana
   nucleo/
     config.py           listas, horarios, límites, sesión y guardado en JSON
+    cuenta.py           cuenta regresiva flotante de los límites
     hosts.py            bloqueo de sitios con el archivo hosts
     procesos.py         programas abiertos, ventana activa y cierre (ctypes, sin librerías externas)
     uso.py              tiempo de uso de hoy de lo que tiene límite diario
@@ -173,7 +180,7 @@ Al abrirla, la pestaña **Inicio** muestra qué falta activar:
 | **Inicio** | Ves si hay un bloqueo y hasta cuándo, empiezas una **sesión de concentración** (con los botones rápidos o escribiendo horas y minutos, hasta 24 horas) y revisas qué falta activar. |
 | **Apps** | Marcas las apps instaladas que quieres bloquear. El teléfono, los ajustes y el propio Bloqueador no se pueden bloquear. |
 | **Sitios** | Escribes una dirección (`youtube.com`) o usas *Agregar rápido*, que también agrega los dominios de videos e imágenes de cada servicio y ofrece bloquear su app. |
-| **Límites** | Un máximo de uso por día para cada app o sitio (por ejemplo, Instagram, 30 minutos). Cada límite muestra cuánto usaste hoy. Tocar uno lo carga en el formulario para cambiarlo. |
+| **Límites** | Un máximo de uso por día para cada app o sitio (por ejemplo, Instagram, 30 minutos). Cada límite muestra cuánto usaste hoy. Tocar uno lo carga en el formulario para cambiarlo. Al final, las opciones de la cuenta regresiva en pantalla. |
 | **Horarios** | Igual que en Windows: si la hora final es menor, termina al día siguiente, y si las dos son iguales, dura 24 h. No se aceptan horarios que cubran la semana entera. Si un horario empieza justo cuando termina otro (o una sesión), el bloqueo sigue sin pausa y la app muestra el fin real. |
 | **Ajustes** | Modo estricto, Protección contra desinstalación y cómo funciona cada cosa (también *"Qué no cubre"*). |
 
@@ -201,6 +208,11 @@ Al abrirla, la pestaña **Inicio** muestra qué falta activar:
   Si un sitio se acaba, la pantalla de bloqueo ofrece *Abrir otra página* en el mismo
   navegador. Agregar o bajar un límite se puede siempre; quitarlo o aumentarlo, no durante un
   bloqueo ni si hoy ya se acabó su tiempo.
+- **Cuenta regresiva:** mientras usas una app o un sitio con límite, el servicio de
+  accesibilidad muestra en una esquina cuánto le queda hoy, y se pone roja en los últimos
+  5 minutos. Es una ventana de accesibilidad: no necesita el permiso de mostrar sobre otras
+  apps y los toques pasan a la app de abajo. Su tamaño, su esquina y si se muestra se eligen al
+  final de la pestaña *Límites*.
 
 ### Protección contra desinstalación
 

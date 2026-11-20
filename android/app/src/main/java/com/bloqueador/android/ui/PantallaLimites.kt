@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -37,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,16 +59,23 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.bloqueador.android.bloqueo.Servicios
 import com.bloqueador.android.datos.Almacen
 import com.bloqueador.android.datos.AlmacenUso
+import com.bloqueador.android.dominio.AjustesCuenta
 import com.bloqueador.android.dominio.Config
 import com.bloqueador.android.dominio.Dominios
 import com.bloqueador.android.dominio.Limite
 import com.bloqueador.android.dominio.MAX_MINUTOS_LIMITE
+import com.bloqueador.android.dominio.PosicionCuenta
+import com.bloqueador.android.dominio.TamanoCuenta
 import com.bloqueador.android.dominio.TipoLimite
 import com.bloqueador.android.dominio.UsoDiario
 import com.bloqueador.android.dominio.etiquetaMinutos
@@ -382,6 +391,7 @@ fun PantallaLimites(
                 alQuitar = { aQuitar = l },
             )
         }
+        item(key = "cuenta") { TarjetaCuenta(config.cuenta, avisar) }
     }
 
     if (eligiendoApp) {
@@ -420,6 +430,83 @@ fun PantallaLimites(
                 if (!quitarLimite(l)) avisar(motivoNoAflojar(nombreDe(l), "quitar"))
             },
             onCancelar = { aQuitar = null },
+        )
+    }
+}
+
+/** Opciones de la cuenta regresiva flotante. Al cambiar algo, se muestra unos segundos para ver cómo queda. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TarjetaCuenta(ajustes: AjustesCuenta, avisar: (String) -> Unit) {
+    fun ver() {
+        if (!Servicios.verCuentaRegresiva()) {
+            avisar(
+                "Para ver la cuenta regresiva, activa el servicio de accesibilidad del Bloqueador " +
+                    "(en la pestaña Inicio)."
+            )
+        }
+    }
+
+    fun cambiar(nuevos: AjustesCuenta) {
+        Almacen.actualizar { it.copy(cuenta = nuevos) }
+        if (nuevos.visible) ver()
+    }
+
+    Tarjeta(titulo = "Cuenta regresiva en pantalla") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .toggleable(
+                    value = ajustes.visible,
+                    role = Role.Switch,
+                    onValueChange = { cambiar(ajustes.copy(visible = it)) },
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Mostrar cuánto le queda a la app o al sitio que estás usando",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f).padding(end = 12.dp),
+            )
+            Switch(checked = ajustes.visible, onCheckedChange = null)
+        }
+        Text("Tamaño", style = MaterialTheme.typography.bodyMedium)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TamanoCuenta.entries.forEach { t ->
+                FilterChip(
+                    selected = ajustes.tamano == t,
+                    onClick = { cambiar(ajustes.copy(tamano = t)) },
+                    label = { Text(t.nombre) },
+                    colors = coloresChip(),
+                )
+            }
+        }
+        Text("Posición", style = MaterialTheme.typography.bodyMedium)
+        // Una cuadrícula de 2 × 2, como las esquinas de la pantalla.
+        Column {
+            listOf(
+                listOf(PosicionCuenta.ARRIBA_IZQ, PosicionCuenta.ARRIBA_DER),
+                listOf(PosicionCuenta.ABAJO_IZQ, PosicionCuenta.ABAJO_DER),
+            ).forEach { fila ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    fila.forEach { p ->
+                        FilterChip(
+                            selected = ajustes.posicion == p,
+                            onClick = { cambiar(ajustes.copy(posicion = p)) },
+                            label = { Text(p.corto, maxLines = 1) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics { contentDescription = p.nombre },
+                            colors = coloresChip(),
+                        )
+                    }
+                }
+            }
+        }
+        OutlinedButton(onClick = { ver() }, modifier = Modifier.fillMaxWidth()) { Text("Ver cómo queda") }
+        TextoAyuda(
+            "Aparece encima de todo mientras usas algo con límite, y se pone roja en los últimos " +
+                "5 minutos. No se puede tocar: los toques pasan a la app de abajo."
         )
     }
 }
