@@ -21,6 +21,9 @@ Cada dispositivo tiene sus propias listas (no se sincronizan).
 3. Recomendado: en **Ajustes**, activa *"Abrir el Bloqueador automáticamente al iniciar
    Windows"*. Así los horarios se cumplen aunque reinicies la PC, y no vuelve a pedir permisos.
 
+Para tenerlo a mano, crea un acceso directo en el escritorio que abra `pythonw.exe` con
+`bloqueador.pyw` como argumento, y usa `windows/bloqueador.ico` como ícono.
+
 ### Uso
 
 | Pestaña | Qué haces |
@@ -113,6 +116,7 @@ estas variables de entorno: `BLOQUEADOR_SIN_ADMIN=1`, `BLOQUEADOR_HOSTS=<ruta a 
 ```
 windows/
   bloqueador.pyw        punto de entrada: pide permisos y abre la ventana
+  bloqueador.ico        ícono para un acceso directo (el mismo de la ventana)
   nucleo/
     config.py           listas, horarios, límites, sesión y guardado en JSON
     cuenta.py           cuenta regresiva flotante de los límites
